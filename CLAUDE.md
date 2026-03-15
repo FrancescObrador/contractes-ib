@@ -117,3 +117,5 @@ Some companies have masked NIFs (contain `**`). Use `buildCompanyIdentityKey(id,
 `pnpm build` runs `node scripts/ingest.mjs && next build`. On Vercel, every deployment automatically downloads a fresh copy of the CAIB CSV so the data is always current at build time. Since the CSV is updated quarterly, this is sufficient.
 
 `contracts-historic.json` is committed to the repo and does not need to be regenerated on each deployment — the pre-2017 data is static. If the scraper logic ever changes, run `pnpm ingest-historic` locally and commit the updated file.
+
+> **Generat (2026-03-15):** 11.330 contractes (2008–2017), 9.27 MB, commitat al repo. No cal regenerar.
