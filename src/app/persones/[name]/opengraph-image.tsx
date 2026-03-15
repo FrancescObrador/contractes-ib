@@ -148,7 +148,7 @@ export default async function Image({ params }: Props) {
               </div>
             </div>
             <div style={{ display: "flex", fontSize: 30, fontWeight: 700, color: "#111827" }}>
-              contractes.cat
+              contractes-ib.cat
             </div>
           </div>
         </div>

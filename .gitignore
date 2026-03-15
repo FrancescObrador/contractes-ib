@@ -51,6 +51,10 @@ next-env.d.ts
 !/data/persones_network/
 /data/persones_network/*
 !/data/persones_network/top250_active_operacions.csv
+!/data/caib/
+/data/caib/*
+!/data/caib/.gitignore
+!/data/caib/contracts-historic.json
 
 # BORME extraction and local processing (keep local-only)
 /borme-dataset/

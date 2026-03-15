@@ -28,13 +28,24 @@ let _cache: CaibContract[] | null = null;
 
 export function getContracts(): CaibContract[] {
   if (_cache) return _cache;
+
+  let main: CaibContract[] = [];
   try {
     const path = join(process.cwd(), "data", "caib", "contracts.json");
-    _cache = JSON.parse(readFileSync(path, "utf-8")) as CaibContract[];
-    return _cache!;
+    main = JSON.parse(readFileSync(path, "utf-8")) as CaibContract[];
   } catch {
     console.warn("CAIB contracts data not found. Run: pnpm ingest");
-    _cache = [];
-    return _cache;
   }
+
+  let historic: CaibContract[] = [];
+  try {
+    const path = join(process.cwd(), "data", "caib", "contracts-historic.json");
+    historic = JSON.parse(readFileSync(path, "utf-8")) as CaibContract[];
+    console.info(`Loaded ${historic.length} historic contracts (pre-2017)`);
+  } catch {
+    // Historic data is optional — run pnpm ingest-historic to generate it
+  }
+
+  _cache = [...historic, ...main];
+  return _cache;
 }

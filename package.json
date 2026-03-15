@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "ingest": "node scripts/ingest.mjs",
+    "ingest-historic": "node scripts/ingest-historic.mjs",
     "doctor": "react-doctor . --yes",
     "doctor:verbose": "react-doctor . --yes --verbose"
   },
