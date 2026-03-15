@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/ingest.mjs && next build",
     "start": "next start",
     "lint": "eslint",
+    "ingest": "node scripts/ingest.mjs",
     "doctor": "react-doctor . --yes",
     "doctor:verbose": "react-doctor . --yes --verbose"
   },

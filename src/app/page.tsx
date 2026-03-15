@@ -6,7 +6,6 @@ import {
   fetchUniqueCompanies,
   fetchTopCompanies,
   fetchYearlyTrend,
-  fetchCpvDistribution,
   fetchContracts,
   fetchTopOrgans,
 } from "@/lib/api";
@@ -29,24 +28,25 @@ import { SITE_NAME, SITE_URL } from "@/config/constants";
 import { buildCompanyHref } from "@/lib/company-identity";
 
 export const metadata: Metadata = {
-  title: "Contractació pública a Catalunya | contractes.cat",
+  title: "Contractació pública a les Illes Balears | contractes.ib",
   description:
-    "Consulta contractes públics i adjudicacions de la contractació pública a Catalunya per empresa, organisme i persona.",
+    "Consulta contractes públics i adjudicacions de la contractació pública a les Illes Balears per empresa, organisme i persona.",
   keywords: [
-    "contractes públics Catalunya",
-    "contractació pública Catalunya",
-    "adjudicacions públiques Catalunya",
-    "licitacions Catalunya",
-    "empreses adjudicatàries Catalunya",
-    "organismes contractants Catalunya",
+    "contractes públics Illes Balears",
+    "contractació pública Illes Balears",
+    "adjudicacions públiques Illes Balears",
+    "licitacions Illes Balears",
+    "empreses adjudicatàries Illes Balears",
+    "organismes contractants Illes Balears",
+    "CAIB contractes",
   ],
   alternates: {
     canonical: "/",
   },
   openGraph: {
-    title: "Contractació pública a Catalunya",
+    title: "Contractació pública a les Illes Balears",
     description:
-      "Consulta contractes públics i adjudicacions de la contractació pública a Catalunya per empresa, organisme i persona.",
+      "Consulta contractes públics i adjudicacions de la contractació pública a les Illes Balears per empresa, organisme i persona.",
     url: SITE_URL,
     siteName: SITE_NAME,
     type: "website",
@@ -55,15 +55,15 @@ export const metadata: Metadata = {
         url: "/social-card-v1.png",
         width: 1200,
         height: 630,
-        alt: "Contractació pública a Catalunya - contractes.cat",
+        alt: "Contractació pública a les Illes Balears - contractes.ib",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Contractació pública a Catalunya",
+    title: "Contractació pública a les Illes Balears",
     description:
-      "Consulta contractes públics i adjudicacions de la contractació pública a Catalunya per empresa, organisme i persona.",
+      "Consulta contractes públics i adjudicacions de la contractació pública a les Illes Balears per empresa, organisme i persona.",
     images: ["/social-card-v1.png"],
   },
 };
@@ -83,7 +83,6 @@ export default async function HomePage() {
     uniqueCompanies,
     topCompanies,
     yearlyTrend,
-    cpvSectors,
     recentContracts,
     topOrgans2024to2026,
   ] = await Promise.all([
@@ -92,7 +91,6 @@ export default async function HomePage() {
     fetchUniqueCompanies(),
     fetchTopCompanies(10, { minYear: topCompaniesMinYear, maxYear: currentYear }),
     fetchYearlyTrend(),
-    fetchCpvDistribution(10),
     fetchContracts({ page: 1, pageSize: 8 }),
     fetchTopOrgans(120, { minYear: 2024, maxYear: 2026 }),
   ]);
@@ -128,14 +126,14 @@ export default async function HomePage() {
         url: SITE_URL,
         inLanguage: "ca",
         description:
-          "Contractació pública a Catalunya: cercador i anàlisi d'adjudicacions per empreses, organismes i persones amb dades obertes.",
+          "Contractació pública a les Illes Balears: cercador i anàlisi d'adjudicacions per empreses, organismes i persones amb dades obertes.",
       },
       {
         "@type": "DataCatalog",
-        name: "Observatori de contractació pública a Catalunya",
+        name: "Observatori de contractació pública a les Illes Balears",
         url: SITE_URL,
         inLanguage: "ca",
-        about: "Contractació pública a Catalunya",
+        about: "Contractació pública a les Illes Balears",
       },
     ],
   };
@@ -153,11 +151,11 @@ export default async function HomePage() {
           </div>
           <div className="relative mb-3 mt-2">
             <h1 className="text-3xl font-bold text-gray-900 text-center leading-tight sm:text-4xl">
-              Contractació pública a Catalunya
+              Contractació pública a les Illes Balears
             </h1>
           </div>
           <p className="mb-5 text-center text-sm text-gray-600 sm:text-base max-w-2xl mx-auto">
-            Observatori independent per consultar qui rep contractes públics a Catalunya. Cerca per <span className="font-medium text-gray-900">empresa</span>, <span className="font-medium text-gray-900">organisme</span> o <span className="font-medium text-gray-900">persona vinculada</span>.
+            Observatori independent per consultar qui rep contractes públics a les Illes Balears. Cerca per <span className="font-medium text-gray-900">empresa</span>, <span className="font-medium text-gray-900">organisme</span> o <span className="font-medium text-gray-900">persona vinculada</span>.
           </p>
           <div className="mb-3 flex justify-center">
             <CompanySearch />
@@ -195,7 +193,7 @@ export default async function HomePage() {
           <StatCard
             title="Total contractes al dataset"
             value={formatNumber(totalContracts)}
-            subtitle="Publicats a la plataforma de transparència"
+            subtitle="Publicats al portal de dades obertes CAIB"
           />
         </section>
 
@@ -273,11 +271,11 @@ export default async function HomePage() {
                 </div>
               </div>
             </div>
-            <p className="mt-2 text-xs text-gray-500">Altres inclou Generalitat, consorcis, diputacions i ens públics.</p>
+            <p className="mt-2 text-xs text-gray-500">Altres inclou Govern Balear, consells insulars, consorcis i ens públics.</p>
           </div>
         </section>
 
-        <section className="mb-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <section className="mb-10">
           <div>
             <h2 className="mb-4 text-2xl font-bold text-gray-900">Evolució anual</h2>
             <div className="rounded-lg border border-gray-100 bg-white p-4 shadow-sm">
@@ -286,42 +284,6 @@ export default async function HomePage() {
             <p className="mt-2 text-xs text-gray-400">
               L&apos;increment dels primers anys reflecteix l&apos;adopció progressiva del registre digital.
               Les dades dels últims 5 anys són les més representatives.
-            </p>
-          </div>
-          <div>
-            <h2 className="mb-4 text-2xl font-bold text-gray-900">Top sectors econòmics</h2>
-            <div className="rounded-lg border border-gray-100 bg-white p-0 shadow-sm">
-              <div className="max-h-[390px] overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-gray-50">
-                    <tr className="border-b border-gray-200">
-                      <th className="w-[10%] px-3 py-2 text-left font-medium text-gray-500">#</th>
-                      <th className="w-[44%] px-3 py-2 text-left font-medium text-gray-500">Sector</th>
-                      <th className="w-[12%] px-3 py-2 text-left font-medium text-gray-500">Codi</th>
-                      <th className="w-[19%] px-3 py-2 text-right font-medium text-gray-500">Import</th>
-                      <th className="w-[15%] px-3 py-2 text-right font-medium text-gray-500">Contractes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cpvSectors.map((sector, index) => (
-                      <tr key={`${sector.code}-${index}`} className="border-b border-gray-100">
-                        <td className="px-3 py-2 text-gray-500">{index + 1}</td>
-                        <td className="px-3 py-2 text-gray-800">{sector.sector}</td>
-                        <td className="px-3 py-2 font-mono text-xs text-gray-600">{sector.code}</td>
-                        <td className="px-3 py-2 text-right text-gray-900">
-                          {formatCompactNumber(sector.total)}
-                        </td>
-                        <td className="px-3 py-2 text-right text-gray-700">
-                          {formatNumber(sector.num_contracts)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <p className="mt-2 text-xs text-gray-500">
-              Agrupació per sectors amplis amb codi de 2 dígits.
             </p>
           </div>
         </section>

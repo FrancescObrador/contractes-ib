@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { SITE_NAME, GITHUB_URL, SOCRATA_DATASET_URL, CREATOR_NAME, CREATOR_URL } from "@/config/constants";
+import { SITE_NAME, GITHUB_URL, CAIB_DATASET_URL, CREATOR_NAME, CREATOR_URL } from "@/config/constants";
 
 export default function Footer() {
   return (
@@ -9,7 +9,7 @@ export default function Footer() {
           <div>
             <h3 className="font-semibold text-gray-900 mb-2">{SITE_NAME}</h3>
             <p className="text-sm text-gray-600">
-              Anàlisi independent de la contractació pública a Catalunya.
+              Anàlisi independent de la contractació pública a les Illes Balears.
               Aquesta no és una web oficial del govern.
             </p>
           </div>
@@ -58,14 +58,14 @@ export default function Footer() {
             <ul className="space-y-2 text-sm">
               <li>
                 <a
-                  href={SOCRATA_DATASET_URL}
+                  href={CAIB_DATASET_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-gray-600 hover:text-gray-900"
                 >
-                  Font de dades (Transparència CAT)
+                  Font de dades (Dades Obertes CAIB)
                 </a>
-                <p className="text-xs text-gray-400 mt-0.5">Plataforma de Serveis de Contractació Pública</p>
+                <p className="text-xs text-gray-400 mt-0.5">Portal de Dades Obertes del Govern de les Illes Balears</p>
               </li>
               <li>
                 <a
@@ -99,10 +99,10 @@ export default function Footer() {
             >
               {CREATOR_NAME}
             </a>
-            , empresa d&apos;enginyeria d&apos;IA a Barcelona, Catalunya.
+            , empresa d&apos;enginyeria d&apos;IA a Barcelona.
           </p>
           <p className="text-gray-400">
-            Dades actualitzades periòdicament des de la Plataforma de Transparència · No és un web oficial del govern de Catalunya
+            Dades del portal de Dades Obertes CAIB · No és un web oficial del Govern de les Illes Balears
           </p>
         </div>
       </div>

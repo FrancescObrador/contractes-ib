@@ -31,10 +31,7 @@ function toContractsCsv(
   ];
 
   const lines = rows.map((r) => {
-    const publicationUrl =
-      typeof r.enllac_publicacio === "string"
-        ? r.enllac_publicacio
-        : r.enllac_publicacio?.url || "";
+    const publicationUrl = r.enllac_publicacio || "";
     return [
       r.codi_expedient,
       r.denominacio,
@@ -58,16 +55,10 @@ function toContractsCsv(
 }
 
 const SORT_MAP: Record<string, { orderBy: string; orderDir: "ASC" | "DESC" }> = {
-  "date-desc": {
-    orderBy: "coalesce(data_adjudicacio_contracte, data_formalitzacio_contracte, data_publicacio_anunci)",
-    orderDir: "DESC",
-  },
-  "date-asc": {
-    orderBy: "coalesce(data_adjudicacio_contracte, data_formalitzacio_contracte, data_publicacio_anunci)",
-    orderDir: "ASC",
-  },
-  "amount-desc": { orderBy: "import_adjudicacio_sense::number", orderDir: "DESC" },
-  "amount-asc": { orderBy: "import_adjudicacio_sense::number", orderDir: "ASC" },
+  "date-desc": { orderBy: "date", orderDir: "DESC" },
+  "date-asc": { orderBy: "date", orderDir: "ASC" },
+  "amount-desc": { orderBy: "import_adjudicacio_sense", orderDir: "DESC" },
+  "amount-asc": { orderBy: "import_adjudicacio_sense", orderDir: "ASC" },
 };
 
 export async function GET(request: NextRequest) {

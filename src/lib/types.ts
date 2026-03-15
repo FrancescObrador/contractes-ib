@@ -1,32 +1,24 @@
 export interface Contract {
   codi_expedient: string;
   denominacio: string;
-  objecte_contracte: string;
   tipus_contracte: string;
   procediment: string;
-  fase_publicacio: string;
   nom_organ: string;
-  nom_departament_ens: string;
-  nom_ambit: string;
   identificacio_adjudicatari: string;
   denominacio_adjudicatari: string;
-  import_adjudicacio_sense: string;
-  import_adjudicacio_amb_iva: string;
+  import_adjudicacio_sense: string; // stored as string for compat
+  import_adjudicacio_amb_iva: string; // stored as string for compat
   data_adjudicacio_contracte: string;
   data_formalitzacio_contracte: string;
   data_publicacio_anunci: string;
   ofertes_rebudes: number;
-  codi_cpv: string;
-  lloc_execucio: string;
-  durada_contracte: string;
   numero_lot: string;
-  descripcio_lot: string;
   pressupost_licitacio_sense: number;
   pressupost_licitacio_amb: number;
-  valor_estimat_contracte: number;
   resultat: string;
-  enllac_publicacio: { url: string } | string;
-  es_agregada: string;
+  enllac_publicacio: string;
+  es_pime: string;
+  financiacio_ue: string;
 }
 
 export interface CompanyAggregation {

@@ -1,10 +1,15 @@
-import {
-  SOCRATA_BASE_URL,
-  CLEAN_AMOUNT_FILTER,
-  CLEAN_AMOUNT_SENSE_FILTER,
-  REVALIDATE_SECONDS,
-  DEFAULT_PAGE_SIZE,
-} from "@/config/constants";
+/**
+ * api.ts — CAIB data access layer
+ *
+ * All functions load data from the in-memory JSON cache (populated by
+ * `scripts/ingest.mjs` via `src/lib/caib-data.ts`) and perform pure
+ * JavaScript array operations.  No network requests are made at runtime.
+ *
+ * Function signatures are kept identical to the previous Socrata-based
+ * implementation so that all pages and API routes continue to work.
+ */
+
+import { getContracts, type CaibContract } from "./caib-data";
 import type {
   Contract,
   CompanyAggregation,
@@ -14,759 +19,22 @@ import type {
   OrganYearAggregation,
   ProcedureAggregation,
   ContractTypeAggregation,
-  CpvAggregation,
   ThresholdBucket,
   ContractFilters,
   MinorRiskEntityAggregation,
   MinorBandSummary,
   MinorShareYear,
 } from "./types";
-import { CPV_DIVISIONS } from "@/config/constants";
-import { buildCompanyIdentityKey, isMaskedCompanyId } from "@/lib/company-identity";
-
-const BEST_AVAILABLE_CONTRACT_DATE_EXPR =
-  "coalesce(data_adjudicacio_contracte, data_formalitzacio_contracte, data_publicacio_anunci)";
-const MISSING_TEXT_VALUES_SQL =
-  "('', '-', '--', '*', '/', 'NULL', 'N/A', 'NA', 'S/D', 'N.D.', 'ND', 'SENSE ADJUDICAR', 'PENDENT D''ADJUDICACIO', 'PENDENT D''ADJUDICACIÓ', 'PENDENT')";
-const AWARDED_CONTRACT_WHERE =
-  `upper(coalesce(denominacio_adjudicatari,'')) not in ${MISSING_TEXT_VALUES_SQL} AND upper(coalesce(identificacio_adjudicatari,'')) not in ${MISSING_TEXT_VALUES_SQL} AND ${CLEAN_AMOUNT_SENSE_FILTER} AND import_adjudicacio_sense IS NOT NULL AND import_adjudicacio_sense::number > 0`;
-const ANALYSIS_MIN_AMOUNT = 500;
-const ANALYSIS_BASE_SENSE_WHERE = `${CLEAN_AMOUNT_SENSE_FILTER} AND import_adjudicacio_sense IS NOT NULL AND import_adjudicacio_sense::number >= ${ANALYSIS_MIN_AMOUNT}`;
-const MINOR_15K_BASE_WHERE = `procediment='Contracte menor' AND ${ANALYSIS_BASE_SENSE_WHERE} AND import_adjudicacio_sense::number < 15000`;
-
-function parseNonNegativeNumber(value: string): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function parseYearFilter(value: string): number | null {
-  if (!/^\d{4}$/.test(value)) return null;
-  const parsed = Number(value);
-  const currentYear = new Date().getFullYear();
-  return parsed >= 2000 && parsed <= currentYear + 1 ? parsed : null;
-}
-
-function getContractsFutureCutoffIso(): string {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() + 7);
-  // Socrata accepts datetime literals like YYYY-MM-DDTHH:MM:SS in comparisons.
-  return `${cutoff.toISOString().slice(0, 10)}T23:59:59`;
-}
-
-function buildAwardeeIdentityCondition(id: string, name?: string): string {
-  const safeId = id.replace(/'/g, "''");
-  if (!isMaskedCompanyId(id)) {
-    return `identificacio_adjudicatari='${safeId}'`;
-  }
-
-  const trimmedName = (name || "").trim();
-  if (!trimmedName) {
-    return `identificacio_adjudicatari='${safeId}'`;
-  }
-
-  const safeName = trimmedName.replace(/'/g, "''");
-  return `identificacio_adjudicatari='${safeId}' AND upper(denominacio_adjudicatari)=upper('${safeName}')`;
-}
-
-function normalizeSearchTerm(search: string): string {
-  return search
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^A-Za-z0-9]/g, "")
-    .toUpperCase();
-}
-
-function normalizeSoqlTextExpr(field: string): string {
-  return `upper(replace(replace(replace(replace(replace(${field},'.',''),',',''),'-',''),' ',''),'/',''))`;
-}
-
-function resolveCpvDivisionCodes(cpvSearch: string): string[] {
-  const normalized = normalizeSearchTerm(cpvSearch);
-  if (!normalized) return [];
-
-  const isNumericSearch = /^\d+$/.test(normalized);
-  const matches: string[] = [];
-
-  for (const [code, label] of Object.entries(CPV_DIVISIONS)) {
-    const normalizedLabel = normalizeSearchTerm(label);
-    const matchesCode = isNumericSearch
-      ? normalized.startsWith(code) || code.startsWith(normalized)
-      : code.includes(normalized);
-
-    if (matchesCode || normalizedLabel.includes(normalized)) {
-      matches.push(code);
-    }
-  }
-
-  return matches;
-}
-
-function normalizeCpvDivisionCodes(filters?: string[]): string[] {
-  if (!filters || filters.length === 0) return [];
-
-  const resolved = new Set<string>();
-
-  for (const token of filters) {
-    const trimmed = token.trim();
-    if (!trimmed) continue;
-
-    const digits = trimmed.replace(/\D/g, "");
-    if (digits.length >= 2) {
-      const code = digits.slice(0, 2);
-      if (CPV_DIVISIONS[code]) {
-        resolved.add(code);
-        continue;
-      }
-    }
-
-    for (const code of resolveCpvDivisionCodes(trimmed)) {
-      resolved.add(code);
-    }
-  }
-
-  return Array.from(resolved);
-}
-
-function buildCpvDivisionWhere(cpvFilters?: string[]): string | null {
-  if (!cpvFilters || cpvFilters.length === 0) return null;
-
-  const codes = normalizeCpvDivisionCodes(cpvFilters);
-  if (codes.length === 0) return "1=0";
-
-  const cpvCodeConditions = codes.map(
-    (code) => `(codi_cpv like '${code}%' OR codi_cpv like '%||${code}%')`
-  );
-  return `codi_cpv IS NOT NULL AND (${cpvCodeConditions.join(" OR ")})`;
-}
-
-function buildLooseSearchCondition(search: string, fields: string[]): string {
-  const safeSearch = search.replace(/'/g, "''");
-  const exactParts = fields.map(
-    (field) => `upper(${field}) like upper('%${safeSearch}%')`
-  );
-
-  const normalized = normalizeSearchTerm(search);
-  if (!normalized) return `(${exactParts.join(" OR ")})`;
-
-  const normalizedParts = fields.map(
-    (field) =>
-      `${normalizeSoqlTextExpr(field)} like upper('%${normalized}%')`
-  );
-
-  return `(${exactParts.join(" OR ")} OR ${normalizedParts.join(" OR ")})`;
-}
-
-async function soqlFetch<T>(params: Record<string, string>): Promise<T[]> {
-  const url = new URL(SOCRATA_BASE_URL);
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
-
-  const res = await fetch(url.toString(), {
-    next: { revalidate: REVALIDATE_SECONDS },
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("Socrata API error:", text);
-    throw new Error(`Socrata API error: ${res.status}`);
-  }
-
-  return res.json();
-}
-
-// Dashboard stats
-export async function fetchTotalContracts(): Promise<number> {
-  const data = await soqlFetch<{ total: string }>({
-    $select: "count(*) as total",
-  });
-  return parseInt(data[0]?.total || "0", 10);
-}
-
-export async function fetchTotalAmount(): Promise<number> {
-  const data = await soqlFetch<{ total: string }>({
-    $select: "sum(import_adjudicacio_amb_iva::number) as total",
-    $where: `${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL`,
-  });
-  return parseFloat(data[0]?.total || "0");
-}
-
-export async function fetchUniqueCompanies(): Promise<number> {
-  const data = await soqlFetch<{ total: string }>({
-    $select: "count(distinct identificacio_adjudicatari) as total",
-    $where: "identificacio_adjudicatari IS NOT NULL",
-  });
-  return parseInt(data[0]?.total || "0", 10);
-}
-
-// Merge rows by company identity. For masked IDs ("**"), identity is ID + name.
-function mergeByNif(rows: CompanyAggregation[]): CompanyAggregation[] {
-  const map = new Map<
-    string,
-    {
-      name: string;
-      total: number;
-      contracts: number;
-      totalCurrentYear: number;
-      bestTotal: number;
-    }
-  >();
-
-  for (const row of rows) {
-    const nif = row.identificacio_adjudicatari;
-    const identityKey = buildCompanyIdentityKey(nif, row.denominacio_adjudicatari);
-    const total = parseFloat(row.total) || 0;
-    const contracts = parseInt(row.num_contracts, 10) || 0;
-    const totalCurrentYear = parseFloat(row.total_current_year || "0") || 0;
-    const existing = map.get(identityKey);
-
-    if (existing) {
-      existing.total += total;
-      existing.contracts += contracts;
-      existing.totalCurrentYear += totalCurrentYear;
-      // Keep the name from the sub-group with the highest total (most-used name)
-      if (total > existing.bestTotal) {
-        existing.name = row.denominacio_adjudicatari;
-        existing.bestTotal = total;
-      }
-    } else {
-      map.set(identityKey, {
-        name: row.denominacio_adjudicatari,
-        total,
-        contracts,
-        totalCurrentYear,
-        bestTotal: total,
-      });
-    }
-  }
-
-  return Array.from(map.entries())
-    .map(([identityKey, data]) => ({
-      identificacio_adjudicatari: identityKey.split("||", 1)[0] || "",
-      denominacio_adjudicatari: data.name,
-      total: String(data.total),
-      num_contracts: String(data.contracts),
-      total_current_year: String(data.totalCurrentYear),
-    }))
-    .sort((a, b) => parseFloat(b.total) - parseFloat(a.total));
-}
-
-// Top companies (merged by NIF)
-export async function fetchTopCompanies(
-  limit = 10,
-  options?: { minYear?: number; maxYear?: number }
-): Promise<CompanyAggregation[]> {
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "denominacio_adjudicatari IS NOT NULL",
-    "identificacio_adjudicatari IS NOT NULL",
-  ];
-  if (options?.minYear !== undefined || options?.maxYear !== undefined) {
-    conditions.push("data_adjudicacio_contracte IS NOT NULL");
-  }
-  if (options?.minYear !== undefined) {
-    conditions.push(`date_extract_y(data_adjudicacio_contracte) >= ${options.minYear}`);
-  }
-  if (options?.maxYear !== undefined) {
-    conditions.push(`date_extract_y(data_adjudicacio_contracte) <= ${options.maxYear}`);
-  }
-
-  // Over-fetch to account for name variations, then merge
-  const raw = await soqlFetch<CompanyAggregation>({
-    $select:
-      "identificacio_adjudicatari, denominacio_adjudicatari, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: conditions.join(" AND "),
-    $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-    $order: "total DESC",
-    $limit: String(limit * 8),
-  });
-  return mergeByNif(raw).slice(0, limit);
-}
-
-// Yearly trend
-export async function fetchYearlyTrend(): Promise<YearlyAggregation[]> {
-  const data = await soqlFetch<YearlyAggregation>({
-    $select:
-      "date_extract_y(data_adjudicacio_contracte) as year, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: `${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND data_adjudicacio_contracte IS NOT NULL`,
-    $group: "year",
-    $order: "year ASC",
-    $limit: "50",
-  });
-  // Filter reasonable years
-  return data.filter((d) => {
-    const y = parseInt(d.year);
-    return y >= 2015 && y <= new Date().getFullYear() + 1;
-  });
-}
-
-// Companies list (paginated, merged by NIF)
-export async function fetchCompanies(
-  offset = 0,
-  limit = DEFAULT_PAGE_SIZE,
-  search?: string,
-  cpvFilters?: string[]
-): Promise<CompanyAggregation[]> {
-  const currentYear = new Date().getFullYear();
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "denominacio_adjudicatari IS NOT NULL",
-    "identificacio_adjudicatari IS NOT NULL",
-  ];
-  if (search) {
-    const safe = search.replace(/'/g, "''");
-    conditions.push(
-      `(upper(denominacio_adjudicatari) like upper('%${safe}%') OR upper(identificacio_adjudicatari) like upper('%${safe}%'))`
-    );
-  }
-  const cpvWhere = buildCpvDivisionWhere(cpvFilters);
-  if (cpvWhere) conditions.push(cpvWhere);
-
-  // Over-fetch then merge by NIF to handle name variations
-  const fetchLimit = (offset + limit) * 6;
-  const raw = await soqlFetch<CompanyAggregation>({
-    $select:
-      "identificacio_adjudicatari, denominacio_adjudicatari, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: conditions.join(" AND "),
-    $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-    $order: "total DESC",
-    $limit: String(fetchLimit),
-  });
-
-  const merged = mergeByNif(raw);
-  const pageRows = merged.slice(offset, offset + limit);
-  if (pageRows.length === 0) return pageRows;
-
-  const escapedNifs = pageRows
-    .map((row) => `'${row.identificacio_adjudicatari.replace(/'/g, "''")}'`)
-    .join(", ");
-  const currentYearRows = await soqlFetch<{
-    identificacio_adjudicatari: string;
-    denominacio_adjudicatari: string;
-    total_current_year: string;
-  }>({
-    $select:
-      "identificacio_adjudicatari, denominacio_adjudicatari, sum(import_adjudicacio_amb_iva::number) as total_current_year",
-    $where: `${conditions.join(" AND ")} AND data_adjudicacio_contracte IS NOT NULL AND date_extract_y(data_adjudicacio_contracte)=${currentYear} AND identificacio_adjudicatari IN (${escapedNifs})`,
-    $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-    $limit: String(limit * 4),
-  });
-
-  const currentYearMap = new Map(
-    currentYearRows.map((row) => [
-      buildCompanyIdentityKey(row.identificacio_adjudicatari, row.denominacio_adjudicatari),
-      row.total_current_year || "0",
-    ])
-  );
-
-  return pageRows.map((row) => ({
-    ...row,
-    total_current_year:
-      currentYearMap.get(buildCompanyIdentityKey(row.identificacio_adjudicatari, row.denominacio_adjudicatari)) ||
-      "0",
-  }));
-}
-
-export async function fetchCompaniesCount(
-  search?: string,
-  cpvFilters?: string[]
-): Promise<number> {
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "denominacio_adjudicatari IS NOT NULL",
-    "identificacio_adjudicatari IS NOT NULL",
-  ];
-  if (search) {
-    const safe = search.replace(/'/g, "''");
-    conditions.push(
-      `(upper(denominacio_adjudicatari) like upper('%${safe}%') OR upper(identificacio_adjudicatari) like upper('%${safe}%'))`
-    );
-  }
-  const cpvWhere = buildCpvDivisionWhere(cpvFilters);
-  if (cpvWhere) conditions.push(cpvWhere);
-
-  const nonMaskedData = await soqlFetch<{ total: string }>({
-    $select: "count(distinct identificacio_adjudicatari) as total",
-    $where: `${conditions.join(" AND ")} AND upper(identificacio_adjudicatari) not like '%**%'`,
-  });
-
-  const maskedConditions = [...conditions, "upper(identificacio_adjudicatari) like '%**%'"];
-  let maskedCount = 0;
-  let offset = 0;
-  const batchSize = 50000;
-
-  while (true) {
-    const rows = await soqlFetch<{
-      identificacio_adjudicatari: string;
-      denominacio_adjudicatari: string;
-    }>({
-      $select: "identificacio_adjudicatari, denominacio_adjudicatari",
-      $where: maskedConditions.join(" AND "),
-      $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-      $limit: String(batchSize),
-      $offset: String(offset),
-    });
-
-    maskedCount += rows.length;
-    if (rows.length < batchSize) break;
-    offset += batchSize;
-  }
-
-  return parseInt(nonMaskedData[0]?.total || "0", 10) + maskedCount;
-}
-
-/** Lightweight paginated list of company ids for sitemap generation. */
-export async function fetchCompanyIdsPage(offset = 0, limit = DEFAULT_PAGE_SIZE): Promise<string[]> {
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "identificacio_adjudicatari IS NOT NULL",
-  ];
-  const rows = await soqlFetch<{ identificacio_adjudicatari: string }>({
-    $select: "identificacio_adjudicatari",
-    $where: conditions.join(" AND "),
-    $group: "identificacio_adjudicatari",
-    $order: "identificacio_adjudicatari ASC",
-    $limit: String(limit),
-    $offset: String(offset),
-  });
-  return rows
-    .map((row) => String(row.identificacio_adjudicatari || "").trim())
-    .filter((id) => id.length > 0);
-}
-
-// Organismes list (paginated)
-export async function fetchOrgans(
-  offset = 0,
-  limit = DEFAULT_PAGE_SIZE,
-  search?: string,
-  options?: { includeCurrentYear?: boolean }
-): Promise<OrganAggregation[]> {
-  const currentYear = new Date().getFullYear();
-  const includeCurrentYear = options?.includeCurrentYear !== false;
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "nom_organ IS NOT NULL",
-  ];
-
-  if (search) {
-    const safe = search.replace(/'/g, "''");
-    conditions.push(`upper(nom_organ) like upper('%${safe}%')`);
-  }
-
-  const rows = await soqlFetch<OrganAggregation>({
-    $select:
-      "nom_organ, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: conditions.join(" AND "),
-    $group: "nom_organ",
-    $order: "total DESC",
-    $limit: String(limit),
-    $offset: String(offset),
-  });
-
-  if (rows.length === 0 || !includeCurrentYear) return rows;
-
-  const escapedNames = rows
-    .map((row) => `'${row.nom_organ.replace(/'/g, "''")}'`)
-    .join(", ");
-  const currentYearRows = await soqlFetch<{ nom_organ: string; total_current_year: string }>({
-    $select: "nom_organ, sum(import_adjudicacio_amb_iva::number) as total_current_year",
-    $where: `${conditions.join(" AND ")} AND data_adjudicacio_contracte IS NOT NULL AND date_extract_y(data_adjudicacio_contracte)=${currentYear} AND nom_organ IN (${escapedNames})`,
-    $group: "nom_organ",
-    $limit: String(limit),
-  });
-
-  const currentYearMap = new Map(
-    currentYearRows.map((row) => [row.nom_organ, row.total_current_year || "0"])
-  );
-
-  return rows.map((row) => ({
-    ...row,
-    total_current_year: currentYearMap.get(row.nom_organ) || "0",
-  }));
-}
-
-export async function fetchOrgansCount(search?: string): Promise<number> {
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "nom_organ IS NOT NULL",
-  ];
-
-  if (search) {
-    const safe = search.replace(/'/g, "''");
-    conditions.push(`upper(nom_organ) like upper('%${safe}%')`);
-  }
-
-  const data = await soqlFetch<{ total: string }>({
-    $select: "count(distinct nom_organ) as total",
-    $where: conditions.join(" AND "),
-  });
-
-  return parseInt(data[0]?.total || "0", 10);
-}
-
-/** Lightweight paginated list of organ names for sitemap generation. */
-export async function fetchOrganNamesPage(offset = 0, limit = DEFAULT_PAGE_SIZE): Promise<string[]> {
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "nom_organ IS NOT NULL",
-  ];
-  const rows = await soqlFetch<{ nom_organ: string }>({
-    $select: "nom_organ",
-    $where: conditions.join(" AND "),
-    $group: "nom_organ",
-    $order: "nom_organ ASC",
-    $limit: String(limit),
-    $offset: String(offset),
-  });
-  return rows
-    .map((row) => String(row.nom_organ || "").trim())
-    .filter((name) => name.length > 0);
-}
-
-export async function fetchOrganDetail(
-  organName: string
-): Promise<{ organ?: OrganAggregation; yearly: OrganYearAggregation[] }> {
-  const safeName = organName.replace(/'/g, "''");
-
-  const [organRows, yearlyRows] = await Promise.all([
-    soqlFetch<OrganAggregation>({
-      $select:
-        "nom_organ, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-      $where: `nom_organ='${safeName}' AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL`,
-      $group: "nom_organ",
-      $limit: "1",
-    }),
-    soqlFetch<OrganYearAggregation>({
-      $select:
-        "nom_organ, date_extract_y(data_adjudicacio_contracte) as year, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-      $where: `nom_organ='${safeName}' AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND data_adjudicacio_contracte IS NOT NULL`,
-      $group: "nom_organ, year",
-      $order: "year ASC",
-      $limit: "500",
-    }),
-  ]);
-
-  const organ = organRows[0];
-  const yearly = yearlyRows.filter((d) => {
-    const y = parseInt(d.year, 10);
-    return y >= 2015 && y <= new Date().getFullYear() + 1;
-  });
-
-  return { organ, yearly };
-}
-
-export async function fetchOrganContracts(
-  organName: string,
-  offset = 0,
-  limit = DEFAULT_PAGE_SIZE
-): Promise<Contract[]> {
-  const safeName = organName.replace(/'/g, "''");
-  return soqlFetch<Contract>({
-    $where: `nom_organ='${safeName}' AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`,
-    $order: `${BEST_AVAILABLE_CONTRACT_DATE_EXPR} DESC`,
-    $limit: String(limit),
-    $offset: String(offset),
-  });
-}
-
-export async function fetchOrganRecentContracts(
-  organName: string,
-  limit = 10
-): Promise<Contract[]> {
-  const safeName = organName.replace(/'/g, "''");
-  const futureCutoffIso = getContractsFutureCutoffIso();
-  return soqlFetch<Contract>({
-    $select:
-      "codi_expedient, denominacio_adjudicatari, import_adjudicacio_sense, data_adjudicacio_contracte, data_formalitzacio_contracte, data_publicacio_anunci, enllac_publicacio",
-    $where: `nom_organ='${safeName}' AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`,
-    $order: `${BEST_AVAILABLE_CONTRACT_DATE_EXPR} DESC`,
-    $limit: String(limit),
-  });
-}
-
-export async function fetchOrganContractsCount(organName: string): Promise<number> {
-  const safeName = organName.replace(/'/g, "''");
-  const data = await soqlFetch<{ total: string }>({
-    $select: "count(*) as total",
-    $where: `nom_organ='${safeName}' AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`,
-  });
-  return parseInt(data[0]?.total || "0", 10);
-}
-
-export async function fetchOrganLastAwardDate(
-  organName: string
-): Promise<string | undefined> {
-  const safeName = organName.replace(/'/g, "''");
-  const futureCutoffIso = getContractsFutureCutoffIso();
-  const data = await soqlFetch<{ last_date?: string }>({
-    $select: `max(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) as last_date`,
-    $where: `nom_organ='${safeName}' AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`,
-  });
-  return data[0]?.last_date;
-}
-
-export async function fetchOrganTopCompanies(
-  organName: string,
-  limit = 10
-): Promise<CompanyAggregation[]> {
-  const safeName = organName.replace(/'/g, "''");
-  const raw = await soqlFetch<CompanyAggregation>({
-    $select:
-      "identificacio_adjudicatari, denominacio_adjudicatari, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: `nom_organ='${safeName}' AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND denominacio_adjudicatari IS NOT NULL AND identificacio_adjudicatari IS NOT NULL`,
-    $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-    $order: "total DESC",
-    $limit: String(limit * 8),
-  });
-  return mergeByNif(raw).slice(0, limit);
-}
-
-// Company detail (merged by NIF across name variations)
-export async function fetchCompanyDetail(
-  id: string,
-  companyName?: string
-): Promise<{ company: CompanyAggregation; yearly: CompanyYearAggregation[] }> {
-  const identityWhere = buildAwardeeIdentityCondition(id, companyName);
-
-  const [companyRows, yearlyRows] = await Promise.all([
-    soqlFetch<CompanyAggregation>({
-      $select:
-        "identificacio_adjudicatari, denominacio_adjudicatari, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-      $where: `${identityWhere} AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL`,
-      $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-      $order: "total DESC",
-      $limit: "100",
-    }),
-    soqlFetch<CompanyYearAggregation>({
-      $select:
-        "identificacio_adjudicatari, denominacio_adjudicatari, date_extract_y(data_adjudicacio_contracte) as year, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-      $where: `${identityWhere} AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND data_adjudicacio_contracte IS NOT NULL`,
-      $group: "identificacio_adjudicatari, denominacio_adjudicatari, year",
-      $order: "year ASC",
-      $limit: "500",
-    }),
-  ]);
-
-  // Merge company rows (name variations) into one
-  const merged = mergeByNif(companyRows);
-  const company = merged[0];
-
-  // Merge yearly rows by year
-  const yearMap = new Map<string, { total: number; contracts: number }>();
-  for (const row of yearlyRows) {
-    const y = row.year;
-    const existing = yearMap.get(y);
-    if (existing) {
-      existing.total += parseFloat(row.total) || 0;
-      existing.contracts += parseInt(row.num_contracts, 10) || 0;
-    } else {
-      yearMap.set(y, {
-        total: parseFloat(row.total) || 0,
-        contracts: parseInt(row.num_contracts, 10) || 0,
-      });
-    }
-  }
-
-  const yearly = Array.from(yearMap.entries())
-    .map(([year, data]) => ({
-      identificacio_adjudicatari: id,
-      denominacio_adjudicatari: company?.denominacio_adjudicatari || "",
-      year,
-      total: String(data.total),
-      num_contracts: String(data.contracts),
-    }))
-    .filter((d) => {
-      const y = parseInt(d.year);
-      return y >= 2015 && y <= new Date().getFullYear() + 1;
-    })
-    .sort((a, b) => parseInt(a.year) - parseInt(b.year));
-
-  return { company, yearly };
-}
-
-export async function fetchCompanyContracts(
-  id: string,
-  companyName?: string,
-  offset = 0,
-  limit = DEFAULT_PAGE_SIZE
-): Promise<Contract[]> {
-  const identityWhere = buildAwardeeIdentityCondition(id, companyName);
-  return soqlFetch<Contract>({
-    $where: `${identityWhere} AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`,
-    $order: `${BEST_AVAILABLE_CONTRACT_DATE_EXPR} DESC`,
-    $limit: String(limit),
-    $offset: String(offset),
-  });
-}
-
-export async function fetchCompanyContractsCount(id: string, companyName?: string): Promise<number> {
-  const identityWhere = buildAwardeeIdentityCondition(id, companyName);
-  const data = await soqlFetch<{ total: string }>({
-    $select: "count(*) as total",
-    $where: `${identityWhere} AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`,
-  });
-  return parseInt(data[0]?.total || "0", 10);
-}
-
-export async function fetchCompanyLastAwardDate(id: string, companyName?: string): Promise<string | undefined> {
-  const identityWhere = buildAwardeeIdentityCondition(id, companyName);
-  const futureCutoffIso = getContractsFutureCutoffIso();
-  const data = await soqlFetch<{ last_date?: string }>({
-    $select: `max(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) as last_date`,
-    $where: `${identityWhere} AND ${AWARDED_CONTRACT_WHERE} AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`,
-  });
-  return data[0]?.last_date;
-}
-
-function buildAwardeeScopeCondition(nifs?: string[], names?: string[]): string | null {
-  const normalizedNifs = Array.from(
-    new Set(
-      (nifs || [])
-        .map((nif) => nif.trim())
-        .filter((nif) => nif.length > 0)
-    )
-  ).slice(0, 400);
-
-  const normalizedNames = Array.from(
-    new Set(
-      (names || [])
-        .map((name) => name.trim())
-        .filter((name) => name.length > 0)
-    )
-  ).slice(0, 400);
-
-  const conditions: string[] = [];
-
-  if (normalizedNifs.length > 0) {
-    const escapedNifs = normalizedNifs
-      .map((nif) => `'${nif.replace(/'/g, "''")}'`)
-      .join(",");
-    conditions.push(`identificacio_adjudicatari IN (${escapedNifs})`);
-  }
-
-  if (normalizedNames.length > 0) {
-    const escapedNames = normalizedNames
-      .map((name) => `'${name.replace(/'/g, "''").toUpperCase()}'`)
-      .join(",");
-    conditions.push(`upper(denominacio_adjudicatari) IN (${escapedNames})`);
-  }
-
-  if (conditions.length === 0) return null;
-  if (conditions.length === 1) return conditions[0];
-  return `(${conditions.join(" OR ")})`;
-}
+import { DEFAULT_PAGE_SIZE, MINOR_CONTRACT_THRESHOLD } from "@/config/constants";
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
 
 interface AwardeeContractFilters {
   nifs?: string[];
   names?: string[];
-  nifDateWindows?: AwardeeNifDateWindow[];
+  nifDateWindows?: Array<{ nif: string; dateFrom?: string; dateTo?: string }>;
   page?: number;
   pageSize?: number;
   orderBy?: string;
@@ -776,157 +44,943 @@ interface AwardeeContractFilters {
   dateTo?: string;
 }
 
-export interface AwardeeContractsSummary {
+interface AwardeeContractsSummary {
   total: number;
   totalAmount: number;
 }
 
-export interface AwardeeNifDateWindow {
-  nif: string;
-  dateFrom?: string;
-  dateTo?: string;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Contracts that have been awarded (have an adjudicatari and positive amount). */
+const AWARDED = (c: CaibContract): boolean =>
+  c.identificacio_adjudicatari !== "" &&
+  c.denominacio_adjudicatari !== "" &&
+  c.import_adjudicacio_sense > 0;
+
+/** Convert a CaibContract to the public Contract interface. */
+function toContract(c: CaibContract): Contract {
+  return {
+    codi_expedient: c.codi_expedient,
+    denominacio: c.denominacio,
+    tipus_contracte: c.tipus_contracte,
+    procediment: c.procediment,
+    nom_organ: c.nom_organ,
+    identificacio_adjudicatari: c.identificacio_adjudicatari,
+    denominacio_adjudicatari: c.denominacio_adjudicatari,
+    import_adjudicacio_sense: String(c.import_adjudicacio_sense),
+    import_adjudicacio_amb_iva: String(c.import_adjudicacio_amb_iva),
+    data_adjudicacio_contracte: c.data_adjudicacio_contracte,
+    data_formalitzacio_contracte: c.data_formalitzacio_contracte,
+    data_publicacio_anunci: c.data_publicacio_anunci,
+    ofertes_rebudes: c.ofertes_rebudes,
+    numero_lot: c.numero_lot,
+    pressupost_licitacio_sense: c.pressupost_licitacio_sense,
+    pressupost_licitacio_amb: c.pressupost_licitacio_sense, // approximate
+    resultat: c.resultat,
+    enllac_publicacio: c.enllac_publicacio,
+    es_pime: c.es_pime,
+    financiacio_ue: c.financiacio_ue,
+  };
 }
 
-function parseIsoDateFilter(value?: string): string | null {
-  if (!value) return null;
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+/** Return the best available date string for a contract (for sorting). */
+function bestDate(c: CaibContract): string {
+  return (
+    c.data_adjudicacio_contracte ||
+    c.data_formalitzacio_contracte ||
+    c.data_publicacio_anunci ||
+    ""
+  );
 }
 
-function buildAwardeeNifDateScopeCondition(
-  windows?: AwardeeNifDateWindow[]
-): string | null {
-  if (!windows || windows.length === 0) return null;
-  const clauses: string[] = [];
-  for (const window of windows) {
-    const nif = (window.nif || "").trim().toUpperCase();
-    if (!/^[A-Z0-9]{8,12}$/.test(nif)) continue;
-    const from = parseIsoDateFilter(window.dateFrom);
-    const to = parseIsoDateFilter(window.dateTo);
-    const parts = [`identificacio_adjudicatari='${nif.replace(/'/g, "''")}'`];
-    if (from) parts.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) >= '${from}T00:00:00'`);
-    if (to) parts.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${to}T23:59:59'`);
-    clauses.push(`(${parts.join(" AND ")})`);
+/** Compare two date strings descending (later dates first). */
+function compareDateDesc(a: string, b: string): number {
+  if (a === b) return 0;
+  return a > b ? -1 : 1;
+}
+
+/** Compare two date strings ascending. */
+function compareDateAsc(a: string, b: string): number {
+  return -compareDateDesc(a, b);
+}
+
+/**
+ * Build a company aggregation map keyed by identificacio_adjudicatari.
+ * Only awarded contracts are included.
+ */
+function groupByCompany(contracts: CaibContract[]): Map<
+  string,
+  {
+    identificacio_adjudicatari: string;
+    denominacio_adjudicatari: string;
+    total: number;
+    count: number;
+    yearlyMap: Map<number, { total: number; count: number }>;
   }
-  if (clauses.length === 0) return null;
-  return `(${clauses.join(" OR ")})`;
+> {
+  const map = new Map<
+    string,
+    {
+      identificacio_adjudicatari: string;
+      denominacio_adjudicatari: string;
+      total: number;
+      count: number;
+      yearlyMap: Map<number, { total: number; count: number }>;
+    }
+  >();
+
+  for (const c of contracts) {
+    const key = c.identificacio_adjudicatari;
+    if (!map.has(key)) {
+      map.set(key, {
+        identificacio_adjudicatari: key,
+        denominacio_adjudicatari: c.denominacio_adjudicatari,
+        total: 0,
+        count: 0,
+        yearlyMap: new Map(),
+      });
+    }
+    const entry = map.get(key)!;
+    entry.total += c.import_adjudicacio_sense;
+    entry.count += 1;
+    // Yearly breakdown
+    const yr = entry.yearlyMap.get(c.year) || { total: 0, count: 0 };
+    yr.total += c.import_adjudicacio_sense;
+    yr.count += 1;
+    entry.yearlyMap.set(c.year, yr);
+  }
+  return map;
 }
+
+/**
+ * Build an organ aggregation map keyed by nom_organ.
+ */
+function groupByOrgan(contracts: CaibContract[]): Map<
+  string,
+  {
+    nom_organ: string;
+    total: number;
+    count: number;
+    yearlyMap: Map<number, { total: number; count: number }>;
+  }
+> {
+  const map = new Map<
+    string,
+    {
+      nom_organ: string;
+      total: number;
+      count: number;
+      yearlyMap: Map<number, { total: number; count: number }>;
+    }
+  >();
+
+  for (const c of contracts) {
+    const key = c.nom_organ;
+    if (!map.has(key)) {
+      map.set(key, {
+        nom_organ: key,
+        total: 0,
+        count: 0,
+        yearlyMap: new Map(),
+      });
+    }
+    const entry = map.get(key)!;
+    entry.total += c.import_adjudicacio_sense;
+    entry.count += 1;
+    const yr = entry.yearlyMap.get(c.year) || { total: 0, count: 0 };
+    yr.total += c.import_adjudicacio_sense;
+    yr.count += 1;
+    entry.yearlyMap.set(c.year, yr);
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Summary stats
+// ---------------------------------------------------------------------------
+
+export async function fetchTotalContracts(): Promise<number> {
+  const contracts = getContracts();
+  return contracts.filter(AWARDED).length;
+}
+
+export async function fetchTotalAmount(): Promise<number> {
+  const contracts = getContracts();
+  return contracts
+    .filter(AWARDED)
+    .reduce((sum, c) => sum + c.import_adjudicacio_sense, 0);
+}
+
+export async function fetchUniqueCompanies(): Promise<number> {
+  const contracts = getContracts();
+  const cifs = new Set(
+    contracts.filter(AWARDED).map((c) => c.identificacio_adjudicatari)
+  );
+  return cifs.size;
+}
+
+// ---------------------------------------------------------------------------
+// Top companies
+// ---------------------------------------------------------------------------
+
+export async function fetchTopCompanies(
+  limit: number,
+  opts?: { minYear?: number; maxYear?: number; organ?: string }
+): Promise<CompanyAggregation[]> {
+  let contracts = getContracts().filter(AWARDED);
+
+  if (opts?.minYear != null) {
+    contracts = contracts.filter((c) => c.year >= opts.minYear!);
+  }
+  if (opts?.maxYear != null) {
+    contracts = contracts.filter((c) => c.year <= opts.maxYear!);
+  }
+  if (opts?.organ) {
+    const organ = opts.organ.toLowerCase();
+    contracts = contracts.filter((c) =>
+      c.nom_organ.toLowerCase().includes(organ)
+    );
+  }
+
+  const map = groupByCompany(contracts);
+  const entries = Array.from(map.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+
+  return entries.map((e) => ({
+    identificacio_adjudicatari: e.identificacio_adjudicatari,
+    denominacio_adjudicatari: e.denominacio_adjudicatari,
+    total: String(e.total),
+    num_contracts: String(e.count),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Yearly trend
+// ---------------------------------------------------------------------------
+
+export async function fetchYearlyTrend(): Promise<YearlyAggregation[]> {
+  const contracts = getContracts().filter(AWARDED);
+  const yearMap = new Map<number, { total: number; count: number }>();
+
+  for (const c of contracts) {
+    const entry = yearMap.get(c.year) || { total: 0, count: 0 };
+    entry.total += c.import_adjudicacio_sense;
+    entry.count += 1;
+    yearMap.set(c.year, entry);
+  }
+
+  return Array.from(yearMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([year, { total, count }]) => ({
+      year: String(year),
+      total: String(total),
+      num_contracts: String(count),
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Companies list (paginated, searchable)
+// ---------------------------------------------------------------------------
+
+export type CompanySort =
+  | "total-desc"
+  | "total-asc"
+  | "contracts-desc"
+  | "contracts-asc"
+  | "name-asc"
+  | "name-desc"
+  | "current_year-desc"
+  | "current_year-asc";
+
+export async function fetchCompanies(
+  offset: number,
+  limit: number,
+  search?: string,
+  _cpv?: string[], // CPV not available in CAIB data — ignored
+  sort: CompanySort = "total-desc"
+): Promise<CompanyAggregation[]> {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const contracts = getContracts().filter(AWARDED);
+  const map = groupByCompany(contracts);
+
+  let entries = Array.from(map.values());
+
+  if (search) {
+    const q = search.toLowerCase();
+    entries = entries.filter(
+      (e) =>
+        e.denominacio_adjudicatari.toLowerCase().includes(q) ||
+        e.identificacio_adjudicatari.toLowerCase().includes(q)
+    );
+  }
+
+  // Build current-year totals if needed for sorting
+  const needsCurrentYear = sort.startsWith("current_year");
+  let currentYearTotals: Map<string, number> | null = null;
+  if (needsCurrentYear) {
+    currentYearTotals = new Map();
+    for (const c of contracts.filter((c) => c.year === currentYear)) {
+      if (!AWARDED(c)) continue;
+      const prev = currentYearTotals.get(c.identificacio_adjudicatari) ?? 0;
+      currentYearTotals.set(c.identificacio_adjudicatari, prev + c.import_adjudicacio_sense);
+    }
+  }
+
+  switch (sort) {
+    case "total-asc":       entries.sort((a, b) => a.total - b.total); break;
+    case "contracts-desc":  entries.sort((a, b) => b.count - a.count); break;
+    case "contracts-asc":   entries.sort((a, b) => a.count - b.count); break;
+    case "name-asc":        entries.sort((a, b) => a.denominacio_adjudicatari.localeCompare(b.denominacio_adjudicatari, "ca")); break;
+    case "name-desc":       entries.sort((a, b) => b.denominacio_adjudicatari.localeCompare(a.denominacio_adjudicatari, "ca")); break;
+    case "current_year-desc": entries.sort((a, b) => (currentYearTotals!.get(b.identificacio_adjudicatari) ?? 0) - (currentYearTotals!.get(a.identificacio_adjudicatari) ?? 0)); break;
+    case "current_year-asc":  entries.sort((a, b) => (currentYearTotals!.get(a.identificacio_adjudicatari) ?? 0) - (currentYearTotals!.get(b.identificacio_adjudicatari) ?? 0)); break;
+    default:                entries.sort((a, b) => b.total - a.total); break; // total-desc
+  }
+
+  const currentYearContractsForPage = needsCurrentYear ? null : (() => {
+    const cyContracts = contracts.filter((c) => c.year === currentYear);
+    const cyMap = groupByCompany(cyContracts);
+    return cyMap;
+  })();
+
+  return entries.slice(offset, offset + limit).map((e) => {
+    const cyTotal = currentYearTotals
+      ? (currentYearTotals.get(e.identificacio_adjudicatari) ?? 0)
+      : (currentYearContractsForPage?.get(e.identificacio_adjudicatari)?.total ?? 0);
+    return {
+      identificacio_adjudicatari: e.identificacio_adjudicatari,
+      denominacio_adjudicatari: e.denominacio_adjudicatari,
+      total: String(e.total),
+      num_contracts: String(e.count),
+      total_current_year: String(cyTotal),
+    };
+  });
+}
+
+export async function fetchCompaniesCount(
+  search?: string,
+  _cpv?: string[]
+): Promise<number> {
+  const contracts = getContracts().filter(AWARDED);
+  const map = groupByCompany(contracts);
+  let entries = Array.from(map.values());
+
+  if (search) {
+    const q = search.toLowerCase();
+    entries = entries.filter(
+      (e) =>
+        e.denominacio_adjudicatari.toLowerCase().includes(q) ||
+        e.identificacio_adjudicatari.toLowerCase().includes(q)
+    );
+  }
+
+  return entries.length;
+}
+
+export async function fetchCompanyIdsPage(
+  offset = 0,
+  limit = DEFAULT_PAGE_SIZE
+): Promise<string[]> {
+  const contracts = getContracts().filter(AWARDED);
+  const map = groupByCompany(contracts);
+  const ids = Array.from(map.keys());
+  ids.sort();
+  return ids.slice(offset, offset + limit);
+}
+
+// ---------------------------------------------------------------------------
+// Organs list (paginated, searchable)
+// ---------------------------------------------------------------------------
+
+export type OrganSort =
+  | "total-desc"
+  | "total-asc"
+  | "contracts-desc"
+  | "contracts-asc"
+  | "name-asc"
+  | "name-desc"
+  | "current_year-desc"
+  | "current_year-asc";
+
+export async function fetchOrgans(
+  offset: number,
+  limit: number,
+  search?: string,
+  opts?: { includeCurrentYear?: boolean; minYear?: number; maxYear?: number; sort?: OrganSort }
+): Promise<OrganAggregation[]> {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const sort: OrganSort = opts?.sort ?? "total-desc";
+
+  const contracts = getContracts().filter(AWARDED);
+  const map = groupByOrgan(contracts);
+
+  let entries = Array.from(map.values());
+
+  if (search) {
+    const q = search.toLowerCase();
+    entries = entries.filter((e) =>
+      e.nom_organ.toLowerCase().includes(q)
+    );
+  }
+
+  const needsCurrentYear = sort.startsWith("current_year") || opts?.includeCurrentYear;
+  const currentYearMap = needsCurrentYear
+    ? groupByOrgan(contracts.filter((c) => c.year === currentYear))
+    : null;
+
+  switch (sort) {
+    case "total-asc":         entries.sort((a, b) => a.total - b.total); break;
+    case "contracts-desc":    entries.sort((a, b) => b.count - a.count); break;
+    case "contracts-asc":     entries.sort((a, b) => a.count - b.count); break;
+    case "name-asc":          entries.sort((a, b) => a.nom_organ.localeCompare(b.nom_organ, "ca")); break;
+    case "name-desc":         entries.sort((a, b) => b.nom_organ.localeCompare(a.nom_organ, "ca")); break;
+    case "current_year-desc": entries.sort((a, b) => (currentYearMap!.get(b.nom_organ)?.total ?? 0) - (currentYearMap!.get(a.nom_organ)?.total ?? 0)); break;
+    case "current_year-asc":  entries.sort((a, b) => (currentYearMap!.get(a.nom_organ)?.total ?? 0) - (currentYearMap!.get(b.nom_organ)?.total ?? 0)); break;
+    default:                  entries.sort((a, b) => b.total - a.total); break; // total-desc
+  }
+
+  const page = entries.slice(offset, offset + limit);
+
+  // Optionally include current year totals
+  if (opts?.includeCurrentYear) {
+    const resolvedCurrentYearMap = currentYearMap ?? groupByOrgan(contracts.filter((c) => c.year === currentYear));
+
+    return page.map((e) => {
+      const cy = resolvedCurrentYearMap.get(e.nom_organ);
+      return {
+        nom_organ: e.nom_organ,
+        total: String(e.total),
+        num_contracts: String(e.count),
+        total_current_year: cy ? String(cy.total) : "0",
+      };
+    });
+  }
+
+  return page.map((e) => ({
+    nom_organ: e.nom_organ,
+    total: String(e.total),
+    num_contracts: String(e.count),
+  }));
+}
+
+export async function fetchOrgansCount(search?: string): Promise<number> {
+  const contracts = getContracts().filter(AWARDED);
+  const map = groupByOrgan(contracts);
+  let entries = Array.from(map.values());
+
+  if (search) {
+    const q = search.toLowerCase();
+    entries = entries.filter((e) =>
+      e.nom_organ.toLowerCase().includes(q)
+    );
+  }
+
+  return entries.length;
+}
+
+export async function fetchOrganNamesPage(
+  offset = 0,
+  limit = DEFAULT_PAGE_SIZE
+): Promise<string[]> {
+  const contracts = getContracts().filter(AWARDED);
+  const map = groupByOrgan(contracts);
+  const names = Array.from(map.keys());
+  names.sort();
+  return names.slice(offset, offset + limit);
+}
+
+// ---------------------------------------------------------------------------
+// Organ detail
+// ---------------------------------------------------------------------------
+
+export async function fetchOrganDetail(organ: string): Promise<{
+  organ: OrganAggregation;
+  yearly: OrganYearAggregation[];
+}> {
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.nom_organ === organ);
+
+  let total = 0;
+  let count = 0;
+  const yearMap = new Map<number, { total: number; count: number }>();
+
+  for (const c of contracts) {
+    total += c.import_adjudicacio_sense;
+    count += 1;
+    const yr = yearMap.get(c.year) || { total: 0, count: 0 };
+    yr.total += c.import_adjudicacio_sense;
+    yr.count += 1;
+    yearMap.set(c.year, yr);
+  }
+
+  const yearly: OrganYearAggregation[] = Array.from(yearMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([year, { total: t, count: cnt }]) => ({
+      nom_organ: organ,
+      year: String(year),
+      total: String(t),
+      num_contracts: String(cnt),
+    }));
+
+  return {
+    organ: {
+      nom_organ: organ,
+      total: String(total),
+      num_contracts: String(count),
+    },
+    yearly,
+  };
+}
+
+export async function fetchOrganContracts(
+  organ: string,
+  offset: number,
+  limit: number,
+  filters?: { year?: string }
+): Promise<Contract[]> {
+  let contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.nom_organ === organ);
+
+  if (filters?.year) {
+    const yr = parseInt(filters.year, 10);
+    contracts = contracts.filter((c) => c.year === yr);
+  }
+
+  contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+
+  return contracts.slice(offset, offset + limit).map(toContract);
+}
+
+export async function fetchOrganRecentContracts(
+  organ: string,
+  limit: number
+): Promise<Contract[]> {
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.nom_organ === organ);
+
+  contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+
+  return contracts.slice(0, limit).map(toContract);
+}
+
+export async function fetchOrganContractsCount(organName: string): Promise<number> {
+  return getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.nom_organ === organName).length;
+}
+
+export async function fetchOrganLastAwardDate(
+  organ: string
+): Promise<string | undefined> {
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.nom_organ === organ);
+
+  if (contracts.length === 0) return undefined;
+
+  contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+  return bestDate(contracts[0]) || undefined;
+}
+
+export async function fetchOrganTopCompanies(
+  organ: string,
+  limit: number
+): Promise<CompanyAggregation[]> {
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.nom_organ === organ);
+
+  const map = groupByCompany(contracts);
+  const entries = Array.from(map.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+
+  return entries.map((e) => ({
+    identificacio_adjudicatari: e.identificacio_adjudicatari,
+    denominacio_adjudicatari: e.denominacio_adjudicatari,
+    total: String(e.total),
+    num_contracts: String(e.count),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Top organs (for home page)
+// ---------------------------------------------------------------------------
+
+export async function fetchTopOrgans(
+  limit: number,
+  opts?: { minYear?: number; maxYear?: number }
+): Promise<OrganAggregation[]> {
+  let contracts = getContracts().filter(AWARDED);
+
+  if (opts?.minYear != null) {
+    contracts = contracts.filter((c) => c.year >= opts.minYear!);
+  }
+  if (opts?.maxYear != null) {
+    contracts = contracts.filter((c) => c.year <= opts.maxYear!);
+  }
+
+  const map = groupByOrgan(contracts);
+  return Array.from(map.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit)
+    .map((e) => ({
+      nom_organ: e.nom_organ,
+      total: String(e.total),
+      num_contracts: String(e.count),
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Company detail
+// ---------------------------------------------------------------------------
+
+export async function fetchCompanyDetail(
+  id: string,
+  name?: string
+): Promise<{
+  company: CompanyAggregation;
+  yearly: CompanyYearAggregation[];
+}> {
+  let contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.identificacio_adjudicatari === id);
+
+  if (name && contracts.length === 0) {
+    // Fallback: search by name if id not found
+    const nameLower = name.toLowerCase();
+    contracts = getContracts()
+      .filter(AWARDED)
+      .filter((c) =>
+        c.denominacio_adjudicatari.toLowerCase().includes(nameLower)
+      );
+  }
+
+  const map = groupByCompany(contracts);
+  const entry =
+    map.get(id) || (map.size > 0 ? Array.from(map.values())[0] : null);
+
+  if (!entry) {
+    return {
+      company: {
+        identificacio_adjudicatari: id,
+        denominacio_adjudicatari: name || "",
+        total: "0",
+        num_contracts: "0",
+      },
+      yearly: [],
+    };
+  }
+
+  const yearly: CompanyYearAggregation[] = Array.from(
+    entry.yearlyMap.entries()
+  )
+    .sort(([a], [b]) => a - b)
+    .map(([year, { total, count }]) => ({
+      denominacio_adjudicatari: entry.denominacio_adjudicatari,
+      identificacio_adjudicatari: entry.identificacio_adjudicatari,
+      year: String(year),
+      total: String(total),
+      num_contracts: String(count),
+    }));
+
+  return {
+    company: {
+      identificacio_adjudicatari: entry.identificacio_adjudicatari,
+      denominacio_adjudicatari: entry.denominacio_adjudicatari,
+      total: String(entry.total),
+      num_contracts: String(entry.count),
+    },
+    yearly,
+  };
+}
+
+export async function fetchCompanyContracts(
+  id: string,
+  name?: string,
+  offset = 0,
+  limit = DEFAULT_PAGE_SIZE
+): Promise<Contract[]> {
+  let contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.identificacio_adjudicatari === id);
+
+  if (name && contracts.length === 0) {
+    const nameLower = name.toLowerCase();
+    contracts = getContracts()
+      .filter(AWARDED)
+      .filter((c) =>
+        c.denominacio_adjudicatari.toLowerCase().includes(nameLower)
+      );
+  }
+
+  contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+  return contracts.slice(offset, offset + limit).map(toContract);
+}
+
+export async function fetchCompanyContractsCount(
+  id: string,
+  companyName?: string
+): Promise<number> {
+  let contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.identificacio_adjudicatari === id);
+
+  if (companyName && contracts.length === 0) {
+    const nameLower = companyName.toLowerCase();
+    contracts = getContracts()
+      .filter(AWARDED)
+      .filter((c) =>
+        c.denominacio_adjudicatari.toLowerCase().includes(nameLower)
+      );
+  }
+
+  return contracts.length;
+}
+
+export async function fetchCompanyLastAwardDate(
+  id: string,
+  companyName?: string
+): Promise<string | undefined> {
+  let contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.identificacio_adjudicatari === id);
+
+  if (companyName && contracts.length === 0) {
+    const nameLower = companyName.toLowerCase();
+    contracts = getContracts()
+      .filter(AWARDED)
+      .filter((c) =>
+        c.denominacio_adjudicatari.toLowerCase().includes(nameLower)
+      );
+  }
+
+  if (contracts.length === 0) return undefined;
+  contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+  return bestDate(contracts[0]) || undefined;
+}
+
+export async function fetchCompanyTopOrgans(
+  id: string,
+  name?: string,
+  limit = 10
+): Promise<OrganAggregation[]> {
+  let contracts = getContracts()
+    .filter(AWARDED)
+    .filter((c) => c.identificacio_adjudicatari === id);
+
+  if (name && contracts.length === 0) {
+    const nameLower = name.toLowerCase();
+    contracts = getContracts()
+      .filter(AWARDED)
+      .filter((c) =>
+        c.denominacio_adjudicatari.toLowerCase().includes(nameLower)
+      );
+  }
+
+  const map = groupByOrgan(contracts);
+  const entries = Array.from(map.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+
+  return entries.map((e) => ({
+    nom_organ: e.nom_organ,
+    total: String(e.total),
+    num_contracts: String(e.count),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Contracts by awardees (for persones page)
+// ---------------------------------------------------------------------------
 
 export async function fetchContractsByAwardees(
   filters: AwardeeContractFilters
 ): Promise<Contract[]> {
-  const conditions: string[] = [];
-  const futureCutoffIso = getContractsFutureCutoffIso();
   const {
     nifs,
     names,
     nifDateWindows,
     page = 1,
     pageSize = DEFAULT_PAGE_SIZE,
-    orderBy = BEST_AVAILABLE_CONTRACT_DATE_EXPR,
-    orderDir = "DESC",
+    orderDir,
     nom_organ,
     dateFrom,
     dateTo,
   } = filters;
 
-  const awardeeScopeCondition = buildAwardeeScopeCondition(nifs, names);
-  if (!awardeeScopeCondition) return [];
-  conditions.push(awardeeScopeCondition);
+  let contracts = getContracts().filter(AWARDED);
 
-  const nifWindowCondition = buildAwardeeNifDateScopeCondition(nifDateWindows);
-  if (nifWindowCondition) {
-    conditions.push(nifWindowCondition);
+  // Filter by NIFs or names
+  if ((nifs && nifs.length > 0) || (names && names.length > 0)) {
+    const nifSet = new Set(nifs || []);
+    const nameLowers = (names || []).map((n) => n.toLowerCase());
+
+    contracts = contracts.filter((c) => {
+      if (nifSet.has(c.identificacio_adjudicatari)) return true;
+      if (
+        nameLowers.some((n) =>
+          c.denominacio_adjudicatari.toLowerCase().includes(n)
+        )
+      )
+        return true;
+      return false;
+    });
+  }
+
+  // NIF+date windows
+  if (nifDateWindows && nifDateWindows.length > 0) {
+    contracts = contracts.filter((c) => {
+      return nifDateWindows.some((w) => {
+        if (w.nif !== c.identificacio_adjudicatari) return false;
+        const date = bestDate(c);
+        if (w.dateFrom && date < w.dateFrom) return false;
+        if (w.dateTo && date > w.dateTo) return false;
+        return true;
+      });
+    });
   }
 
   if (nom_organ) {
-    conditions.push(`upper(nom_organ) like upper('%${nom_organ.replace(/'/g, "''")}%')`);
+    contracts = contracts.filter((c) => c.nom_organ === nom_organ);
   }
 
-  const from = parseIsoDateFilter(dateFrom);
-  const to = parseIsoDateFilter(dateTo);
-  if (from) {
-    conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) >= '${from}T00:00:00'`);
+  if (dateFrom) {
+    contracts = contracts.filter((c) => bestDate(c) >= dateFrom);
   }
-  if (to) {
-    conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${to}T23:59:59'`);
+  if (dateTo) {
+    contracts = contracts.filter((c) => bestDate(c) <= dateTo);
   }
 
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`);
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`);
-  conditions.push(AWARDED_CONTRACT_WHERE);
+  // Sort
+  if (orderDir === "ASC") {
+    contracts.sort((a, b) => compareDateAsc(bestDate(a), bestDate(b)));
+  } else {
+    contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+  }
 
-  return soqlFetch<Contract>({
-    $where: conditions.join(" AND "),
-    $order: `${orderBy} ${orderDir}`,
-    $limit: String(pageSize),
-    $offset: String((page - 1) * pageSize),
-  });
+  const offset = (page - 1) * pageSize;
+  return contracts.slice(offset, offset + pageSize).map(toContract);
 }
 
 export async function fetchContractsByAwardeesCount(
-  filters: Pick<
-    AwardeeContractFilters,
-    "nifs" | "names" | "nifDateWindows" | "nom_organ" | "dateFrom" | "dateTo"
-  >
+  filters: AwardeeContractFilters
 ): Promise<number> {
-  const summary = await fetchContractsByAwardeesSummary(filters);
-  return summary.total;
-}
-
-export async function fetchContractsByAwardeesSummary(
-  filters: Pick<
-    AwardeeContractFilters,
-    "nifs" | "names" | "nifDateWindows" | "nom_organ" | "dateFrom" | "dateTo"
-  >
-): Promise<AwardeeContractsSummary> {
-  const conditions: string[] = [];
-  const futureCutoffIso = getContractsFutureCutoffIso();
   const { nifs, names, nifDateWindows, nom_organ, dateFrom, dateTo } = filters;
 
-  const awardeeScopeCondition = buildAwardeeScopeCondition(nifs, names);
-  if (!awardeeScopeCondition) {
-    return { total: 0, totalAmount: 0 };
-  }
-  conditions.push(awardeeScopeCondition);
+  let contracts = getContracts().filter(AWARDED);
 
-  const nifWindowCondition = buildAwardeeNifDateScopeCondition(nifDateWindows);
-  if (nifWindowCondition) {
-    conditions.push(nifWindowCondition);
+  if ((nifs && nifs.length > 0) || (names && names.length > 0)) {
+    const nifSet = new Set(nifs || []);
+    const nameLowers = (names || []).map((n) => n.toLowerCase());
+
+    contracts = contracts.filter((c) => {
+      if (nifSet.has(c.identificacio_adjudicatari)) return true;
+      if (
+        nameLowers.some((n) =>
+          c.denominacio_adjudicatari.toLowerCase().includes(n)
+        )
+      )
+        return true;
+      return false;
+    });
+  }
+
+  if (nifDateWindows && nifDateWindows.length > 0) {
+    contracts = contracts.filter((c) => {
+      return nifDateWindows.some((w) => {
+        if (w.nif !== c.identificacio_adjudicatari) return false;
+        const date = bestDate(c);
+        if (w.dateFrom && date < w.dateFrom) return false;
+        if (w.dateTo && date > w.dateTo) return false;
+        return true;
+      });
+    });
   }
 
   if (nom_organ) {
-    conditions.push(`upper(nom_organ) like upper('%${nom_organ.replace(/'/g, "''")}%')`);
+    contracts = contracts.filter((c) => c.nom_organ === nom_organ);
   }
 
-  const from = parseIsoDateFilter(dateFrom);
-  const to = parseIsoDateFilter(dateTo);
-  if (from) {
-    conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) >= '${from}T00:00:00'`);
+  if (dateFrom) {
+    contracts = contracts.filter((c) => bestDate(c) >= dateFrom);
   }
-  if (to) {
-    conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${to}T23:59:59'`);
+  if (dateTo) {
+    contracts = contracts.filter((c) => bestDate(c) <= dateTo);
   }
 
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`);
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`);
-  conditions.push(AWARDED_CONTRACT_WHERE);
-
-  const rows = await soqlFetch<{ total: string }>({
-    $select: "count(*) as total, sum(import_adjudicacio_sense::number) as total_amount",
-    $where: conditions.join(" AND "),
-  });
-  return {
-    total: parseInt(rows[0]?.total || "0", 10),
-    totalAmount: parseFloat((rows[0] as { total_amount?: string })?.total_amount || "0"),
-  };
+  return contracts.length;
 }
 
-// Contracts list with filters
+export async function fetchContractsByAwardeesSummary(
+  filters: AwardeeContractFilters
+): Promise<AwardeeContractsSummary> {
+  const { nifs, names, nifDateWindows, nom_organ, dateFrom, dateTo } = filters;
+
+  let contracts = getContracts().filter(AWARDED);
+
+  if ((nifs && nifs.length > 0) || (names && names.length > 0)) {
+    const nifSet = new Set(nifs || []);
+    const nameLowers = (names || []).map((n) => n.toLowerCase());
+
+    contracts = contracts.filter((c) => {
+      if (nifSet.has(c.identificacio_adjudicatari)) return true;
+      if (
+        nameLowers.some((n) =>
+          c.denominacio_adjudicatari.toLowerCase().includes(n)
+        )
+      )
+        return true;
+      return false;
+    });
+  }
+
+  if (nifDateWindows && nifDateWindows.length > 0) {
+    contracts = contracts.filter((c) => {
+      return nifDateWindows.some((w) => {
+        if (w.nif !== c.identificacio_adjudicatari) return false;
+        const date = bestDate(c);
+        if (w.dateFrom && date < w.dateFrom) return false;
+        if (w.dateTo && date > w.dateTo) return false;
+        return true;
+      });
+    });
+  }
+
+  if (nom_organ) {
+    contracts = contracts.filter((c) => c.nom_organ === nom_organ);
+  }
+
+  if (dateFrom) {
+    contracts = contracts.filter((c) => bestDate(c) >= dateFrom);
+  }
+  if (dateTo) {
+    contracts = contracts.filter((c) => bestDate(c) <= dateTo);
+  }
+
+  const totalAmount = contracts.reduce(
+    (sum, c) => sum + c.import_adjudicacio_sense,
+    0
+  );
+
+  return { total: contracts.length, totalAmount };
+}
+
+// ---------------------------------------------------------------------------
+// Contracts explorer (paginated, filtered)
+// ---------------------------------------------------------------------------
+
 export async function fetchContracts(
   filters: ContractFilters
 ): Promise<Contract[]> {
-  const conditions: string[] = [];
-  const futureCutoffIso = getContractsFutureCutoffIso();
   const {
     year,
     tipus_contracte,
@@ -936,624 +990,381 @@ export async function fetchContracts(
     nom_organ,
     search,
     nif,
+    awardee_name,
     page = 1,
     pageSize = DEFAULT_PAGE_SIZE,
-    orderBy = BEST_AVAILABLE_CONTRACT_DATE_EXPR,
+    orderBy,
     orderDir = "DESC",
   } = filters;
 
-  if (nif) {
-    conditions.push(buildAwardeeIdentityCondition(nif, filters.awardee_name));
-  }
+  let contracts = getContracts().filter(AWARDED);
+
   if (year) {
-    const parsedYear = parseYearFilter(year);
-    if (parsedYear !== null) {
-      conditions.push(`date_extract_y(data_adjudicacio_contracte)=${parsedYear}`);
-    }
+    const yr = parseInt(year, 10);
+    contracts = contracts.filter((c) => c.year === yr);
   }
   if (tipus_contracte) {
-    conditions.push(`tipus_contracte='${tipus_contracte.replace(/'/g, "''")}'`);
+    contracts = contracts.filter(
+      (c) => c.tipus_contracte === tipus_contracte
+    );
   }
   if (procediment) {
-    conditions.push(`procediment='${procediment.replace(/'/g, "''")}'`);
+    contracts = contracts.filter((c) => c.procediment === procediment);
   }
   if (amountMin) {
-    const parsedAmountMin = parseNonNegativeNumber(amountMin);
-    if (parsedAmountMin !== null) {
-      conditions.push(
-        `${CLEAN_AMOUNT_SENSE_FILTER} AND import_adjudicacio_sense::number >= ${parsedAmountMin}`
-      );
+    const min = parseFloat(amountMin);
+    if (!isNaN(min)) {
+      contracts = contracts.filter((c) => c.import_adjudicacio_sense >= min);
     }
   }
   if (amountMax) {
-    const parsedAmountMax = parseNonNegativeNumber(amountMax);
-    if (parsedAmountMax !== null) {
-      conditions.push(
-        `${CLEAN_AMOUNT_SENSE_FILTER} AND import_adjudicacio_sense::number <= ${parsedAmountMax}`
-      );
+    const max = parseFloat(amountMax);
+    if (!isNaN(max)) {
+      contracts = contracts.filter((c) => c.import_adjudicacio_sense <= max);
     }
   }
   if (nom_organ) {
-    conditions.push(
-      `upper(nom_organ) like upper('%${nom_organ.replace(/'/g, "''")}%')`
+    contracts = contracts.filter((c) => c.nom_organ === nom_organ);
+  }
+  if (nif) {
+    contracts = contracts.filter(
+      (c) => c.identificacio_adjudicatari === nif
+    );
+  }
+  if (awardee_name) {
+    const q = awardee_name.toLowerCase();
+    contracts = contracts.filter((c) =>
+      c.denominacio_adjudicatari.toLowerCase().includes(q)
     );
   }
   if (search) {
-    conditions.push(
-      buildLooseSearchCondition(search, [
-        "denominacio",
-        "denominacio_adjudicatari",
-        "identificacio_adjudicatari",
-      ])
+    const q = search.toLowerCase();
+    contracts = contracts.filter(
+      (c) =>
+        c.denominacio.toLowerCase().includes(q) ||
+        c.denominacio_adjudicatari.toLowerCase().includes(q) ||
+        c.nom_organ.toLowerCase().includes(q) ||
+        c.codi_expedient.toLowerCase().includes(q)
     );
   }
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`);
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`);
-  conditions.push(AWARDED_CONTRACT_WHERE);
 
-  const params: Record<string, string> = {
-    $order: `${orderBy} ${orderDir}`,
-    $limit: String(pageSize),
-    $offset: String((page - 1) * pageSize),
-  };
+  // Determine sort order.
+  // orderBy may contain SQL-like strings from the route; detect by content.
+  const isAmountSort = orderBy && orderBy.includes("import");
 
-  if (conditions.length > 0) {
-    params.$where = conditions.join(" AND ");
+  if (isAmountSort) {
+    if (orderDir === "ASC") {
+      contracts.sort(
+        (a, b) => a.import_adjudicacio_sense - b.import_adjudicacio_sense
+      );
+    } else {
+      contracts.sort(
+        (a, b) => b.import_adjudicacio_sense - a.import_adjudicacio_sense
+      );
+    }
+  } else {
+    // date sort (default)
+    if (orderDir === "ASC") {
+      contracts.sort((a, b) => compareDateAsc(bestDate(a), bestDate(b)));
+    } else {
+      contracts.sort((a, b) => compareDateDesc(bestDate(a), bestDate(b)));
+    }
   }
 
-  return soqlFetch<Contract>(params);
+  const offset = (page - 1) * pageSize;
+  return contracts.slice(offset, offset + pageSize).map(toContract);
 }
 
 export async function fetchContractsCount(
   filters: ContractFilters
 ): Promise<number> {
-  const conditions: string[] = [];
-  const futureCutoffIso = getContractsFutureCutoffIso();
-  const { year, tipus_contracte, procediment, amountMin, amountMax, nom_organ, search, nif, awardee_name } = filters;
+  const {
+    year,
+    tipus_contracte,
+    procediment,
+    amountMin,
+    amountMax,
+    nom_organ,
+    search,
+    nif,
+    awardee_name,
+  } = filters;
 
-  if (nif) {
-    conditions.push(buildAwardeeIdentityCondition(nif, awardee_name));
-  }
+  let contracts = getContracts().filter(AWARDED);
+
   if (year) {
-    const parsedYear = parseYearFilter(year);
-    if (parsedYear !== null) {
-      conditions.push(`date_extract_y(data_adjudicacio_contracte)=${parsedYear}`);
-    }
+    const yr = parseInt(year, 10);
+    contracts = contracts.filter((c) => c.year === yr);
   }
   if (tipus_contracte) {
-    conditions.push(`tipus_contracte='${tipus_contracte.replace(/'/g, "''")}'`);
+    contracts = contracts.filter(
+      (c) => c.tipus_contracte === tipus_contracte
+    );
   }
   if (procediment) {
-    conditions.push(`procediment='${procediment.replace(/'/g, "''")}'`);
+    contracts = contracts.filter((c) => c.procediment === procediment);
   }
   if (amountMin) {
-    const parsedAmountMin = parseNonNegativeNumber(amountMin);
-    if (parsedAmountMin !== null) {
-      conditions.push(
-        `${CLEAN_AMOUNT_SENSE_FILTER} AND import_adjudicacio_sense::number >= ${parsedAmountMin}`
-      );
+    const min = parseFloat(amountMin);
+    if (!isNaN(min)) {
+      contracts = contracts.filter((c) => c.import_adjudicacio_sense >= min);
     }
   }
   if (amountMax) {
-    const parsedAmountMax = parseNonNegativeNumber(amountMax);
-    if (parsedAmountMax !== null) {
-      conditions.push(
-        `${CLEAN_AMOUNT_SENSE_FILTER} AND import_adjudicacio_sense::number <= ${parsedAmountMax}`
-      );
+    const max = parseFloat(amountMax);
+    if (!isNaN(max)) {
+      contracts = contracts.filter((c) => c.import_adjudicacio_sense <= max);
     }
   }
   if (nom_organ) {
-    conditions.push(`upper(nom_organ) like upper('%${nom_organ.replace(/'/g, "''")}%')`);
+    contracts = contracts.filter((c) => c.nom_organ === nom_organ);
+  }
+  if (nif) {
+    contracts = contracts.filter(
+      (c) => c.identificacio_adjudicatari === nif
+    );
+  }
+  if (awardee_name) {
+    const q = awardee_name.toLowerCase();
+    contracts = contracts.filter((c) =>
+      c.denominacio_adjudicatari.toLowerCase().includes(q)
+    );
   }
   if (search) {
-    conditions.push(
-      buildLooseSearchCondition(search, [
-        "denominacio",
-        "denominacio_adjudicatari",
-        "identificacio_adjudicatari",
-      ])
+    const q = search.toLowerCase();
+    contracts = contracts.filter(
+      (c) =>
+        c.denominacio.toLowerCase().includes(q) ||
+        c.denominacio_adjudicatari.toLowerCase().includes(q) ||
+        c.nom_organ.toLowerCase().includes(q) ||
+        c.codi_expedient.toLowerCase().includes(q)
     );
   }
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL`);
-  conditions.push(`(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'`);
-  conditions.push(AWARDED_CONTRACT_WHERE);
 
-  const params: Record<string, string> = {
-    $select: "count(*) as total",
-  };
-  if (conditions.length > 0) {
-    params.$where = conditions.join(" AND ");
-  }
-
-  const data = await soqlFetch<{ total: string }>(params);
-  return parseInt(data[0]?.total || "0", 10);
+  return contracts.length;
 }
 
-// Analysis: threshold distribution
+// ---------------------------------------------------------------------------
+// Minor contracts analysis
+// ---------------------------------------------------------------------------
+
 export async function fetchThresholdDistribution(): Promise<ThresholdBucket[]> {
-  // Fetch counts in 500 EUR buckets from 500 to 15000 for minor contracts
-  const buckets: ThresholdBucket[] = [];
-  const bucketSize = 500;
-  const promises: Promise<{ total: string }[]>[] = [];
-
-  for (let start = ANALYSIS_MIN_AMOUNT; start < 15000; start += bucketSize) {
-    const end = start + bucketSize;
-    promises.push(
-      soqlFetch<{ total: string }>({
-        $select: "count(*) as total",
-        $where: `${MINOR_15K_BASE_WHERE} AND import_adjudicacio_sense::number >= ${start} AND import_adjudicacio_sense::number < ${end}`,
-      })
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter(
+      (c) =>
+        c.procediment === "Contracte menor" &&
+        c.import_adjudicacio_sense <= MINOR_CONTRACT_THRESHOLD
     );
+
+  // Build buckets of 500 EUR each from 0 to 15000
+  const bucketSize = 500;
+  const numBuckets = Math.ceil(MINOR_CONTRACT_THRESHOLD / bucketSize);
+  const counts = new Array<number>(numBuckets).fill(0);
+
+  for (const c of contracts) {
+    const idx = Math.min(
+      Math.floor(c.import_adjudicacio_sense / bucketSize),
+      numBuckets - 1
+    );
+    counts[idx]++;
   }
 
-  const results = await Promise.all(promises);
-
-  for (let i = 0; i < results.length; i++) {
-    const start = ANALYSIS_MIN_AMOUNT + i * bucketSize;
-    const end = start + bucketSize;
-    buckets.push({
-      range_start: start,
-      range_end: end,
-      label: `${(start / 1000).toFixed(1)}k-${(end / 1000).toFixed(1)}k`,
-      count: parseInt(results[i][0]?.total || "0", 10),
-    });
-  }
-
-  return buckets;
+  return counts.map((count, i) => ({
+    range_start: i * bucketSize,
+    range_end: (i + 1) * bucketSize,
+    label: `${i * bucketSize}–${(i + 1) * bucketSize}`,
+    count,
+  }));
 }
 
 export async function fetchMinorBandSummary(): Promise<MinorBandSummary> {
-  const [totalRows, riskRows, riskAmountRows] = await Promise.all([
-    soqlFetch<{ total: string }>({
-      $select: "count(*) as total",
-      $where: MINOR_15K_BASE_WHERE,
-    }),
-    soqlFetch<{ total: string }>({
-      $select: "count(*) as total",
-      $where: `${MINOR_15K_BASE_WHERE} AND import_adjudicacio_sense::number >= 14900 AND import_adjudicacio_sense::number < 15000`,
-    }),
-    soqlFetch<{ total_amount: string }>({
-      $select: "sum(import_adjudicacio_amb_iva::number) as total_amount",
-      $where: `${MINOR_15K_BASE_WHERE} AND import_adjudicacio_sense::number >= 14900 AND import_adjudicacio_sense::number < 15000 AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL`,
-    }),
-  ]);
+  const contracts = getContracts().filter(AWARDED);
+
+  const minorUnder15k = contracts.filter(
+    (c) =>
+      c.procediment === "Contracte menor" &&
+      c.import_adjudicacio_sense < MINOR_CONTRACT_THRESHOLD
+  );
+
+  const riskBand = contracts.filter(
+    (c) =>
+      c.procediment === "Contracte menor" &&
+      c.import_adjudicacio_sense >= 14900 &&
+      c.import_adjudicacio_sense <= MINOR_CONTRACT_THRESHOLD
+  );
 
   return {
-    total_minor_under_15k: parseInt(totalRows[0]?.total || "0", 10),
-    risk_band_14900_15000: parseInt(riskRows[0]?.total || "0", 10),
-    risk_band_14900_15000_amount: parseFloat(riskAmountRows[0]?.total_amount || "0"),
+    total_minor_under_15k: minorUnder15k.length,
+    risk_band_14900_15000: riskBand.length,
+    risk_band_14900_15000_amount: riskBand.reduce(
+      (sum, c) => sum + c.import_adjudicacio_sense,
+      0
+    ),
   };
 }
 
 export async function fetchTopOrgansInMinorRiskBand(
-  limit = 20
+  limit: number
 ): Promise<MinorRiskEntityAggregation[]> {
-  const rows = await soqlFetch<{ nom_organ: string; amount: string; num_contracts: string }>({
-    $select:
-      "nom_organ, count(*) as num_contracts, sum(import_adjudicacio_amb_iva::number) as amount",
-    $where: `${MINOR_15K_BASE_WHERE} AND import_adjudicacio_sense::number >= 14900 AND import_adjudicacio_sense::number < 15000 AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND nom_organ IS NOT NULL`,
-    $group: "nom_organ",
-    $order: "num_contracts DESC, amount DESC",
-    $limit: String(limit),
-  });
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter(
+      (c) =>
+        c.procediment === "Contracte menor" &&
+        c.import_adjudicacio_sense >= 14900 &&
+        c.import_adjudicacio_sense <= MINOR_CONTRACT_THRESHOLD
+    );
 
-  return rows.map((r) => ({
-    name: r.nom_organ,
-    amount: r.amount,
-    num_contracts: r.num_contracts,
-  }));
+  const map = groupByOrgan(contracts);
+  return Array.from(map.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit)
+    .map((e) => ({
+      name: e.nom_organ,
+      amount: String(e.total),
+      num_contracts: String(e.count),
+    }));
 }
 
-export async function fetchTopCompaniesInMinorRiskBand(
-  limit = 20
-): Promise<CompanyAggregation[]> {
-  const raw = await soqlFetch<CompanyAggregation>({
-    $select:
-      "identificacio_adjudicatari, denominacio_adjudicatari, count(*) as num_contracts, sum(import_adjudicacio_amb_iva::number) as total",
-    $where: `${MINOR_15K_BASE_WHERE} AND import_adjudicacio_sense::number >= 14900 AND import_adjudicacio_sense::number < 15000 AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND denominacio_adjudicatari IS NOT NULL AND identificacio_adjudicatari IS NOT NULL`,
-    $group: "identificacio_adjudicatari, denominacio_adjudicatari",
-    $order: "num_contracts DESC, total DESC",
-    $limit: String(limit * 8),
-  });
-  return mergeByNif(raw).slice(0, limit);
+export async function fetchTopCompaniesInMinorRiskBand(limit: number): Promise<
+  {
+    name: string;
+    identificacio_adjudicatari: string;
+    denominacio_adjudicatari: string;
+    total: string;
+    num_contracts: string;
+  }[]
+> {
+  const contracts = getContracts()
+    .filter(AWARDED)
+    .filter(
+      (c) =>
+        c.procediment === "Contracte menor" &&
+        c.import_adjudicacio_sense >= 14900 &&
+        c.import_adjudicacio_sense <= MINOR_CONTRACT_THRESHOLD
+    );
+
+  const map = groupByCompany(contracts);
+  return Array.from(map.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit)
+    .map((e) => ({
+      name: e.denominacio_adjudicatari,
+      identificacio_adjudicatari: e.identificacio_adjudicatari,
+      denominacio_adjudicatari: e.denominacio_adjudicatari,
+      total: String(e.total),
+      num_contracts: String(e.count),
+    }));
 }
 
 export async function fetchMinorShareYearly(): Promise<MinorShareYear[]> {
-  const [yearlyTotalCount, yearlyMinorCount, yearlyTotalAmount, yearlyMinorAmount] =
-    await Promise.all([
-      soqlFetch<{ year: string; total_contracts: string }>({
-        $select: "date_extract_y(data_adjudicacio_contracte) as year, count(*) as total_contracts",
-        $where: `${ANALYSIS_BASE_SENSE_WHERE} AND data_adjudicacio_contracte IS NOT NULL`,
-        $group: "year",
-        $order: "year ASC",
-        $limit: "50",
-      }),
-      soqlFetch<{ year: string; minor_contracts: string }>({
-        $select: "date_extract_y(data_adjudicacio_contracte) as year, count(*) as minor_contracts",
-        $where: `${ANALYSIS_BASE_SENSE_WHERE} AND procediment='Contracte menor' AND data_adjudicacio_contracte IS NOT NULL`,
-        $group: "year",
-        $order: "year ASC",
-        $limit: "50",
-      }),
-      soqlFetch<{ year: string; total_amount: string }>({
-        $select:
-          "date_extract_y(data_adjudicacio_contracte) as year, sum(import_adjudicacio_amb_iva::number) as total_amount",
-        $where: `${ANALYSIS_BASE_SENSE_WHERE} AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND data_adjudicacio_contracte IS NOT NULL`,
-        $group: "year",
-        $order: "year ASC",
-        $limit: "50",
-      }),
-      soqlFetch<{ year: string; minor_amount: string }>({
-        $select:
-          "date_extract_y(data_adjudicacio_contracte) as year, sum(import_adjudicacio_amb_iva::number) as minor_amount",
-        $where: `${ANALYSIS_BASE_SENSE_WHERE} AND procediment='Contracte menor' AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND data_adjudicacio_contracte IS NOT NULL`,
-        $group: "year",
-        $order: "year ASC",
-        $limit: "50",
-      }),
-    ]);
+  const contracts = getContracts().filter(AWARDED);
 
-  const countMap = new Map<string, { total: number; minor: number }>();
-  const amountMap = new Map<string, { total: number; minor: number }>();
-
-  for (const row of yearlyTotalCount) {
-    countMap.set(row.year, {
-      total: parseInt(row.total_contracts || "0", 10),
-      minor: 0,
-    });
-  }
-
-  for (const row of yearlyMinorCount) {
-    const existing = countMap.get(row.year);
-    if (existing) {
-      existing.minor = parseInt(row.minor_contracts || "0", 10);
-    } else {
-      countMap.set(row.year, {
-        total: 0,
-        minor: parseInt(row.minor_contracts || "0", 10),
-      });
+  const yearMap = new Map<
+    number,
+    {
+      total_contracts: number;
+      minor_contracts: number;
+      total_amount: number;
+      minor_amount: number;
     }
-  }
+  >();
 
-  for (const row of yearlyTotalAmount) {
-    amountMap.set(row.year, {
-      total: parseFloat(row.total_amount || "0"),
-      minor: 0,
-    });
-  }
-
-  for (const row of yearlyMinorAmount) {
-    const existing = amountMap.get(row.year);
-    if (existing) {
-      existing.minor = parseFloat(row.minor_amount || "0");
-    } else {
-      amountMap.set(row.year, {
-        total: 0,
-        minor: parseFloat(row.minor_amount || "0"),
-      });
-    }
-  }
-
-  const years = Array.from(
-    new Set([...Array.from(countMap.keys()), ...Array.from(amountMap.keys())])
-  )
-    .map((y) => parseInt(y, 10))
-    .filter((y) => y >= 2015 && y <= new Date().getFullYear() + 1)
-    .sort((a, b) => a - b)
-    .map(String);
-
-  return years.map((year) => {
-    const count = countMap.get(year) || { total: 0, minor: 0 };
-    const amount = amountMap.get(year) || { total: 0, minor: 0 };
-    const contractsShare =
-      count.total > 0 ? (count.minor / count.total) * 100 : 0;
-    const amountShare =
-      amount.total > 0 ? (amount.minor / amount.total) * 100 : 0;
-
-    return {
-      year,
-      total_contracts: count.total,
-      minor_contracts: count.minor,
-      total_amount: amount.total,
-      minor_amount: amount.minor,
-      minor_contracts_share: contractsShare,
-      minor_amount_share: amountShare,
+  for (const c of contracts) {
+    const entry = yearMap.get(c.year) || {
+      total_contracts: 0,
+      minor_contracts: 0,
+      total_amount: 0,
+      minor_amount: 0,
     };
-  });
+    entry.total_contracts += 1;
+    entry.total_amount += c.import_adjudicacio_sense;
+    if (c.procediment === "Contracte menor") {
+      entry.minor_contracts += 1;
+      entry.minor_amount += c.import_adjudicacio_sense;
+    }
+    yearMap.set(c.year, entry);
+  }
+
+  return Array.from(yearMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([year, e]) => ({
+      year: String(year),
+      total_contracts: e.total_contracts,
+      minor_contracts: e.minor_contracts,
+      total_amount: e.total_amount,
+      minor_amount: e.minor_amount,
+      minor_contracts_share:
+        e.total_contracts > 0 ? e.minor_contracts / e.total_contracts : 0,
+      minor_amount_share:
+        e.total_amount > 0 ? e.minor_amount / e.total_amount : 0,
+    }));
 }
 
-// Analysis: procedure distribution
+// ---------------------------------------------------------------------------
+// CPV distribution (CAIB has no CPV data — return empty array)
+// ---------------------------------------------------------------------------
+
+export async function fetchCpvDistribution(
+  _limit: number
+): Promise<
+  {
+    code: string;
+    sector: string;
+    total: number;
+    num_contracts: number;
+  }[]
+> {
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// Procedure and contract type distributions
+// ---------------------------------------------------------------------------
+
 export async function fetchProcedureDistribution(): Promise<
   ProcedureAggregation[]
 > {
-  return soqlFetch<ProcedureAggregation>({
-    $select:
-      "procediment, count(*) as total, sum(import_adjudicacio_amb_iva::number) as amount",
-    $where: `${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND procediment IS NOT NULL`,
-    $group: "procediment",
-    $order: "total DESC",
-    $limit: "20",
-  });
+  const contracts = getContracts().filter(AWARDED);
+  const map = new Map<string, { total: number; count: number }>();
+
+  for (const c of contracts) {
+    const key = c.procediment || "Desconegut";
+    const entry = map.get(key) || { total: 0, count: 0 };
+    entry.total += c.import_adjudicacio_sense;
+    entry.count += 1;
+    map.set(key, entry);
+  }
+
+  return Array.from(map.entries())
+    .sort(([, a], [, b]) => b.count - a.count)
+    .map(([procediment, { total, count }]) => ({
+      procediment,
+      total: String(count),
+      amount: String(total),
+    }));
 }
 
-// Analysis: contract type distribution
 export async function fetchContractTypeDistribution(): Promise<
   ContractTypeAggregation[]
 > {
-  return soqlFetch<ContractTypeAggregation>({
-    $select:
-      "tipus_contracte, count(*) as total, sum(import_adjudicacio_amb_iva::number) as amount",
-    $where: `${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND tipus_contracte IS NOT NULL`,
-    $group: "tipus_contracte",
-    $order: "total DESC",
-    $limit: "20",
-  });
-}
+  const contracts = getContracts().filter(AWARDED);
+  const map = new Map<string, { total: number; count: number }>();
 
-// Analysis: minor contracts yearly trend
-export async function fetchMinorContractsYearly(): Promise<
-  YearlyAggregation[]
-> {
-  const data = await soqlFetch<YearlyAggregation>({
-    $select:
-      "date_extract_y(data_adjudicacio_contracte) as year, count(*) as num_contracts, sum(import_adjudicacio_amb_iva::number) as total",
-    $where: `procediment='Contracte menor' AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND data_adjudicacio_contracte IS NOT NULL`,
-    $group: "year",
-    $order: "year ASC",
-    $limit: "50",
-  });
-  return data.filter((d) => {
-    const y = parseInt(d.year);
-    return y >= 2015 && y <= new Date().getFullYear() + 1;
-  });
-}
-
-// CPV sector distribution (aggregated by 2-digit division in JS)
-export async function fetchCpvDistribution(
-  limit = 15
-): Promise<{ sector: string; code: string; total: number; num_contracts: number }[]> {
-  // Fetch top CPV codes grouped by full code, then aggregate by 2-digit division
-  const raw = await soqlFetch<CpvAggregation>({
-    $select:
-      "codi_cpv, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: `${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND codi_cpv IS NOT NULL AND codi_cpv not like '%||%'`,
-    $group: "codi_cpv",
-    $order: "total DESC",
-    $limit: "1000",
-  });
-
-  // Aggregate by 2-digit CPV division
-  const sectorMap = new Map<
-    string,
-    { total: number; contracts: number }
-  >();
-
-  for (const row of raw) {
-    const code = row.codi_cpv.trim();
-    const division = code.slice(0, 2);
-    if (!/^\d{2}$/.test(division)) continue;
-
-    const total = parseFloat(row.total) || 0;
-    const contracts = parseInt(row.num_contracts, 10) || 0;
-    const existing = sectorMap.get(division);
-
-    if (existing) {
-      existing.total += total;
-      existing.contracts += contracts;
-    } else {
-      sectorMap.set(division, { total, contracts });
-    }
+  for (const c of contracts) {
+    const key = c.tipus_contracte || "Desconegut";
+    const entry = map.get(key) || { total: 0, count: 0 };
+    entry.total += c.import_adjudicacio_sense;
+    entry.count += 1;
+    map.set(key, entry);
   }
 
-  return Array.from(sectorMap.entries())
-    .map(([code, data]) => ({
-      sector: CPV_DIVISIONS[code] || `Sector ${code}`,
-      code,
-      total: data.total,
-      num_contracts: data.contracts,
-    }))
-    .sort((a, b) => b.total - a.total)
-    .slice(0, limit);
-}
-
-// Top contracting bodies
-export async function fetchTopOrgans(
-  limit = 10,
-  options?: { minYear?: number; maxYear?: number }
-): Promise<{ nom_organ: string; total: string; num_contracts: string }[]> {
-  const conditions = [
-    CLEAN_AMOUNT_FILTER,
-    "import_adjudicacio_amb_iva IS NOT NULL",
-    "nom_organ IS NOT NULL",
-  ];
-  if (options?.minYear !== undefined || options?.maxYear !== undefined) {
-    conditions.push("data_adjudicacio_contracte IS NOT NULL");
-  }
-  if (options?.minYear !== undefined) {
-    conditions.push(`date_extract_y(data_adjudicacio_contracte) >= ${options.minYear}`);
-  }
-  if (options?.maxYear !== undefined) {
-    conditions.push(`date_extract_y(data_adjudicacio_contracte) <= ${options.maxYear}`);
-  }
-
-  return soqlFetch({
-    $select:
-      "nom_organ, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: conditions.join(" AND "),
-    $group: "nom_organ",
-    $order: "total DESC",
-    $limit: String(limit),
-  });
-}
-
-// Top contracting bodies for a specific company (counterparties)
-export async function fetchCompanyTopOrgans(
-  companyId: string,
-  companyName?: string,
-  limit = 10
-): Promise<{ nom_organ: string; total: string; num_contracts: string }[]> {
-  const identityWhere = buildAwardeeIdentityCondition(companyId, companyName);
-  return soqlFetch({
-    $select:
-      "nom_organ, sum(import_adjudicacio_amb_iva::number) as total, count(*) as num_contracts",
-    $where: `${identityWhere} AND ${CLEAN_AMOUNT_FILTER} AND import_adjudicacio_amb_iva IS NOT NULL AND nom_organ IS NOT NULL`,
-    $group: "nom_organ",
-    $order: "total DESC",
-    $limit: String(limit),
-  });
-}
-
-export async function fetchRecentActivityWindow(
-  days = 7
-): Promise<{
-  num_contracts: number;
-  total_amount: number;
-  unique_organs: number;
-  unique_companies: number;
-  last_award_date?: string;
-}> {
-  const safeDays = Number.isFinite(days) ? Math.max(1, Math.floor(days)) : 7;
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - safeDays);
-  const cutoffIso = `${cutoff.toISOString().slice(0, 10)}T00:00:00`;
-  const futureCutoffIso = getContractsFutureCutoffIso();
-
-  const rows = await soqlFetch<{
-    num_contracts?: string;
-    total_amount?: string;
-    unique_organs?: string;
-    unique_companies?: string;
-    last_award_date?: string;
-  }>({
-    $select: `
-      count(*) as num_contracts,
-      sum(import_adjudicacio_amb_iva::number) as total_amount,
-      count(distinct nom_organ) as unique_organs,
-      count(distinct identificacio_adjudicatari) as unique_companies,
-      max(${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) as last_award_date
-    `,
-    $where: `
-      ${AWARDED_CONTRACT_WHERE}
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) >= '${cutoffIso}'
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'
-      AND ${CLEAN_AMOUNT_FILTER}
-      AND import_adjudicacio_amb_iva IS NOT NULL
-    `,
-  });
-
-  const row = rows[0] || {};
-  return {
-    num_contracts: parseInt(row.num_contracts || "0", 10),
-    total_amount: parseFloat(row.total_amount || "0"),
-    unique_organs: parseInt(row.unique_organs || "0", 10),
-    unique_companies: parseInt(row.unique_companies || "0", 10),
-    last_award_date: row.last_award_date,
-  };
-}
-
-async function fetchRecentActivityBetween(
-  startIso: string,
-  endIso: string
-): Promise<{
-  num_contracts: number;
-  total_amount: number;
-  unique_organs: number;
-  unique_companies: number;
-}> {
-  const futureCutoffIso = getContractsFutureCutoffIso();
-  const rows = await soqlFetch<{
-    num_contracts?: string;
-    total_amount?: string;
-    unique_organs?: string;
-    unique_companies?: string;
-  }>({
-    $select: `
-      count(*) as num_contracts,
-      sum(import_adjudicacio_amb_iva::number) as total_amount,
-      count(distinct nom_organ) as unique_organs,
-      count(distinct identificacio_adjudicatari) as unique_companies
-    `,
-    $where: `
-      ${AWARDED_CONTRACT_WHERE}
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) IS NOT NULL
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) >= '${startIso}'
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${endIso}'
-      AND (${BEST_AVAILABLE_CONTRACT_DATE_EXPR}) <= '${futureCutoffIso}'
-      AND ${CLEAN_AMOUNT_FILTER}
-      AND import_adjudicacio_amb_iva IS NOT NULL
-    `,
-  });
-
-  const row = rows[0] || {};
-  return {
-    num_contracts: parseInt(row.num_contracts || "0", 10),
-    total_amount: parseFloat(row.total_amount || "0"),
-    unique_organs: parseInt(row.unique_organs || "0", 10),
-    unique_companies: parseInt(row.unique_companies || "0", 10),
-  };
-}
-
-export async function fetchRecentActivityComparison(
-  days = 90,
-  offsetDays = 365,
-  lagDays = 90
-): Promise<{
-  current: {
-    num_contracts: number;
-    total_amount: number;
-    unique_organs: number;
-    unique_companies: number;
-  };
-  previous: {
-    num_contracts: number;
-    total_amount: number;
-    unique_organs: number;
-    unique_companies: number;
-  };
-  meta: {
-    current_start: string;
-    current_end: string;
-    previous_start: string;
-    previous_end: string;
-    lag_days: number;
-  };
-}> {
-  const safeDays = Number.isFinite(days) ? Math.max(1, Math.floor(days)) : 90;
-  const safeOffset = Number.isFinite(offsetDays)
-    ? Math.max(safeDays, Math.floor(offsetDays))
-    : 365;
-  const safeLag = Number.isFinite(lagDays) ? Math.max(0, Math.floor(lagDays)) : 21;
-
-  const currentEnd = new Date();
-  currentEnd.setDate(currentEnd.getDate() - safeLag);
-  const currentStart = new Date(currentEnd);
-  currentStart.setDate(currentStart.getDate() - safeDays + 1);
-
-  const previousEnd = new Date(currentEnd);
-  previousEnd.setDate(previousEnd.getDate() - safeOffset);
-  const previousStart = new Date(previousEnd);
-  previousStart.setDate(previousStart.getDate() - safeDays + 1);
-
-  const currentStartIso = `${currentStart.toISOString().slice(0, 10)}T00:00:00`;
-  const currentEndIso = `${currentEnd.toISOString().slice(0, 10)}T23:59:59`;
-  const previousStartIso = `${previousStart.toISOString().slice(0, 10)}T00:00:00`;
-  const previousEndIso = `${previousEnd.toISOString().slice(0, 10)}T23:59:59`;
-
-  const [current, previous] = await Promise.all([
-    fetchRecentActivityBetween(currentStartIso, currentEndIso),
-    fetchRecentActivityBetween(previousStartIso, previousEndIso),
-  ]);
-
-  return {
-    current,
-    previous,
-    meta: {
-      current_start: currentStartIso.slice(0, 10),
-      current_end: currentEndIso.slice(0, 10),
-      previous_start: previousStartIso.slice(0, 10),
-      previous_end: previousEndIso.slice(0, 10),
-      lag_days: safeLag,
-    },
-  };
+  return Array.from(map.entries())
+    .sort(([, a], [, b]) => b.count - a.count)
+    .map(([tipus_contracte, { total, count }]) => ({
+      tipus_contracte,
+      total: String(count),
+      amount: String(total),
+    }));
 }

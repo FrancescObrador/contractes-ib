@@ -1,8 +1,8 @@
-# contractes.cat
+# contractes.ib
 
-Anàlisi independent de la contractació pública a Catalunya.
+Anàlisi independent de la contractació pública a les Illes Balears.
 
-**Aquesta no és una web oficial del govern.** Les dades provenen de la [Plataforma de Transparència de Catalunya](https://analisi.transparenciacatalunya.cat) i es mostren amb finalitat informativa.
+**Aquesta no és una web oficial del govern.** Les dades provenen del [Portal de Dades Obertes del Govern de les Illes Balears (CAIB)](https://intranet.caib.es/opendatacataleg/) i es mostren amb finalitat informativa.
 
 ## Funcionalitats
 
@@ -18,16 +18,19 @@ Anàlisi independent de la contractació pública a Catalunya.
 - [Tailwind CSS](https://tailwindcss.com) 4
 - [Recharts](https://recharts.org) per a gràfiques
 - TypeScript
-- Dades: [Socrata Open Data API (SODA)](https://dev.socrata.com/)
+- Dades: CSV estàtic del portal de dades obertes CAIB (actualitzat trimestralment)
 
 ## Desenvolupament
 
 ```bash
 pnpm install
+pnpm ingest    # Descarrega el CSV i genera data/caib/contracts.json
 pnpm dev
 ```
 
 Obre [http://localhost:3000](http://localhost:3000) al navegador.
+
+Cal executar `pnpm ingest` almenys una vegada abans de `pnpm dev`. Sense `data/caib/contracts.json` el site mostra dades buides.
 
 ### Variables d'entorn (BORME/Turso)
 
@@ -42,15 +45,22 @@ També es suporta `TURSO_AUTH_TOKEN` com a alternativa a `TURSO_TOKEN`.
 
 ## Font de dades
 
-Totes les dades provenen del conjunt de dades [Contractació pública a Catalunya](https://analisi.transparenciacatalunya.cat/Sector-P-blic/Contractaci-del-sector-p-blic-de-la-Generalitat-d/ybgg-dgi6) publicat pel Departament d'Economia i Hisenda de la Generalitat de Catalunya.
+Les dades de contractació provenen del conjunt de dades [Contractes de la Comunitat Autònoma de les Illes Balears](https://intranet.caib.es/opendatacataleg/dataset/c992354b-7546-4280-a144-6211f6ecfed4) publicat pel Govern de les Illes Balears (CAIB).
+
+- **Format:** CSV separat per punt i coma, separador decimal coma, UTF-8
+- **Mida:** ~16 MB (~70.000+ registres)
+- **Actualització:** Trimestral
+- **URL directa:** `https://intranet.caib.es/opendatacataleg/dataset/c992354b-7546-4280-a144-6211f6ecfed4/resource/34ea0416-90fb-43cc-a866-4933cc6ce6e1/download/contractes_ca.csv`
 
 ## Desplegament
 
 Desplegat a [Vercel](https://vercel.com). Per desplegar la teva pròpia instància:
 
 ```bash
-pnpm run build
+pnpm run build   # Equivalent a: node scripts/ingest.mjs && next build
 ```
+
+A Vercel, cada desplegament descarrega automàticament el CSV actualitzat.
 
 ## CLI (`@gerardgimenezadsuar/contractes-cli`)
 
@@ -69,7 +79,7 @@ Documentació de la CLI:
 ## Descobribilitat per agents (ChatGPT/Claude)
 
 - `llms.txt` al root del repo (lectura a GitHub)
-- `public/llms.txt` publicat a `https://www.contractes.cat/llms.txt`
+- `public/llms.txt` publicat a `https://contractes.ib/llms.txt`
 - README de la CLI amb exemples copy-paste
 - Metadata NPM (`keywords`, `description`) per millorar la cerca
 

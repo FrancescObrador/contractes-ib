@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { SITE_NAME, GITHUB_URL, SOCRATA_DATASET_URL, CREATOR_NAME, CREATOR_URL } from "@/config/constants";
+import { SITE_NAME, GITHUB_URL, CAIB_DATASET_URL, CREATOR_NAME, CREATOR_URL } from "@/config/constants";
 import SharePageButton from "@/components/ui/SharePageButton";
 
 export const metadata: Metadata = {
@@ -28,8 +28,8 @@ export default function AboutPage() {
           <strong>Aquesta no és una web oficial del govern.</strong> {SITE_NAME}{" "}
           és un projecte independent i de codi obert que utilitza dades
           públiques per facilitar l&apos;anàlisi de la contractació pública a
-          Catalunya. No tenim cap vinculació amb la Generalitat de Catalunya ni
-          amb cap administració pública.
+          les Illes Balears. No tenim cap vinculació amb el Govern de les Illes
+          Balears ni amb cap administració pública.
         </p>
       </section>
 
@@ -41,7 +41,7 @@ export default function AboutPage() {
         <p className="text-gray-600 mb-4">
           {SITE_NAME} és una plataforma d&apos;anàlisi de dades obertes que
           permet als ciutadans explorar i entendre com es gasten els diners
-          públics en contractació a Catalunya. El nostre objectiu és fer
+          públics en contractació a les Illes Balears. El nostre objectiu és fer
           accessible i comprensible la informació sobre contractes públics que
           ja és pública però sovint difícil de navegar.
         </p>
@@ -60,33 +60,30 @@ export default function AboutPage() {
         <p className="text-gray-600 mb-4">
           Totes les dades provenen del conjunt de dades{" "}
           <a
-            href={SOCRATA_DATASET_URL}
+            href={CAIB_DATASET_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="text-blue-600 hover:underline"
           >
-            &quot;Contractació pública a Catalunya: publicacions a la Plataforma de
-            serveis de contractació pública&quot;
+            &quot;Contractes de la Comunitat Autònoma de les Illes Balears&quot;
           </a>{" "}
-          publicat pel Departament d&apos;Economia i Hisenda de la Generalitat
-          de Catalunya a la plataforma de Transparència de Catalunya.
+          publicat pel Govern de les Illes Balears (CAIB) al portal de Dades
+          Obertes.
         </p>
         <p className="text-gray-600 mb-4">
-          El conjunt de dades conté les publicacions de l&apos;activitat
-          contractual dels òrgans de contractació que publiquen a la Plataforma
-          de serveis de contractació pública de Catalunya. <strong>Pot no incloure la
-          totalitat dels contractes públics de Catalunya</strong>, ja que no totes
-          les administracions i entitats públiques publiquen els seus contractes
-          en aquesta plataforma.
+          El conjunt de dades conté l&apos;activitat contractual dels òrgans de
+          contractació del Govern de les Illes Balears. <strong>Pot no incloure la
+          totalitat dels contractes públics de les Illes Balears</strong>, ja que no
+          totes les administracions locals i entitats públiques estan incloses.
         </p>
         <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600">
           <p className="font-medium text-gray-900 mb-2">Detalls tècnics:</p>
           <ul className="list-disc list-inside space-y-1">
-            <li>API: Socrata Open Data (SODA)</li>
-            <li>Actualització: Les dades s&apos;actualitzen periòdicament a la font</li>
-            <li>Memòria cau: Les dades es refresquen aproximadament cada 6 hores</li>
+            <li>Format: CSV estàtic (actualització trimestral)</li>
+            <li>Mida: ~16 MB (~70.000+ registres)</li>
+            <li>Les dades es descarreguen i processen a cada desplegament</li>
             <li>
-              Un petit nombre de registres (~0,3%) amb dades inconsistents
+              Els registres sense adjudicatari o amb import nul
               s&apos;exclouen dels càlculs agregats
             </li>
           </ul>
@@ -99,10 +96,11 @@ export default function AboutPage() {
           Metodologia
         </h2>
         <p className="text-gray-600 mb-4">
-          Les agregacions (imports totals, mitjanes, etc.) es calculen
-          directament a la base de dades mitjançant consultes SoQL, excloent
-          registres amb dades d&apos;import corruptes. Els imports sense IVA i
-          amb IVA es mostren tal com estan publicats a la font original.
+          Les agregacions (imports totals, rànquings, etc.) es calculen
+          directament sobre el fitxer JSON generat a partir del CSV de la CAIB,
+          excloent registres sense adjudicatari o amb import nul. Els imports
+          sense IVA i amb IVA es mostren tal com estan publicats a la font
+          original.
         </p>
         <p className="text-gray-600">
           L&apos;anàlisi del llindar de contractes menors es basa en el límit
