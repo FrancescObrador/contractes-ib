@@ -94,7 +94,7 @@ export default async function Image({ params }: Props) {
                 fontWeight: 500,
               }}
             >
-              Vinculacions legals i contractació pública a Catalunya
+              Vinculacions legals i contractació pública a les Illes Balears
             </div>
           </div>
 

@@ -242,7 +242,7 @@ export default async function Image({ params }: Props) {
                 }}
               />
               <div style={{ display: "flex", fontSize: 16, color: "#6B7280" }}>
-                Dades obertes · Contractació pública de Catalunya
+                Dades obertes · Contractació pública de les Illes Balears
               </div>
             </div>
             <div style={{ display: "flex", fontSize: 30, fontWeight: 700, color: "#111827" }}>

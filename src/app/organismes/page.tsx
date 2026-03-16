@@ -7,7 +7,7 @@ import SharePageButton from "@/components/ui/SharePageButton";
 export const metadata: Metadata = {
   title: "Organismes contractants",
   description:
-    "Rànquing d'organismes per import total de contractes públics adjudicats a Catalunya.",
+    "Rànquing d'organismes per import total de contractes públics adjudicats a les Illes Balears.",
 };
 
 interface Props {

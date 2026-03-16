@@ -30,7 +30,7 @@ const OUTPUT_PATH = join(OUTPUT_DIR, "contracts-historic.json");
 const PROGRESS_PATH = join(OUTPUT_DIR, "contracts-historic-progress.json");
 
 const BASE_URL = "https://plataformadecontractacio.caib.es";
-const DELAY_MS = 350;   // ms between requests (~3 req/s)
+const DELAY_MS = 165;   // ms between requests (~6 req/s)
 const SAVE_EVERY = 50;  // save progress every N detail pages
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ async function parseListingPage(pagina) {
 async function parseDetailPage(id) {
   const url = `${BASE_URL}/Licitacion.jsp?id=${id}&idOrganoContratacion=-1&idi=ca&baja=&historico=true`;
   const buf = await get(url);
-  const html = decodeIso(buf);
+  const html = decodeIso(buf); // decodes &nbsp;→space, &oacute;→ó, etc.
 
   // Error pages
   if (
@@ -237,80 +237,117 @@ async function parseDetailPage(id) {
   const info = infoM ? infoM[1] : html;
 
   /**
-   * Extract the value after a bold label like:
-   *   <span style='...'>Label text:</span>&nbsp;Value<br/>
-   * Both ' and " quotes are used in style attributes.
+   * Build a map of all label→value pairs in the page.
+   *
+   * HTML pattern (after decoding): <span style='...'>Label:</span> Value<br/>
+   * After decodeIso(), &nbsp; is a plain space, so we use \s+ not &nbsp;
    */
-  function lbl(labelRe) {
-    const re = new RegExp(
-      `<span[^>]*>\\s*${labelRe}\\s*:?\\s*</span>\\s*&nbsp;\\s*([^<]+)`,
-      "i"
-    );
-    const m = info.match(re);
-    return m ? m[1].trim() : "";
+  const labelMap = Object.create(null);
+  const spanRe = /<span[^>]*>\s*([^<]+?)\s*<\/span>\s+([^<\r\n]+)/g;
+  let sm;
+  while ((sm = spanRe.exec(info)) !== null) {
+    const label = sm[1].trim().replace(/:$/, "").trim().toLowerCase();
+    const value = sm[2].trim();
+    if (label && value && !labelMap[label]) {
+      labelMap[label] = value; // keep first occurrence
+    }
+  }
+  // Also store last occurrence (Formalització section overwrites Provisional)
+  const spanReLast = /<span[^>]*>\s*([^<]+?)\s*<\/span>\s+([^<\r\n]+)/g;
+  const labelMapLast = Object.create(null);
+  while ((sm = spanReLast.exec(info)) !== null) {
+    const label = sm[1].trim().replace(/:$/, "").trim().toLowerCase();
+    const value = sm[2].trim();
+    if (label && value) labelMapLast[label] = value;
   }
 
-  const organ = stripOrgPeriod(lbl("Òrgan de contractació"));
-  const tipus = normalizeType(lbl("Tipus de contracte"));
-  const procediment = lbl("Procediment");
-  const expedient = lbl("Núm\\.? d'expedient");
+  const lbl  = (k) => labelMap[k.toLowerCase()] || "";
+  const lblL = (k) => labelMapLast[k.toLowerCase()] || "";
 
-  // Budget
-  const budgetSenseStr = lbl("Pressupost de licitació \\(IVA exclòs\\)");
-  const budgetAmbStr   = lbl("Pressupost de licitació \\(IVA inclòs\\)");
-  const pressupost_licitacio_sense = parseNum(budgetSenseStr.replace(/\s*(Euros|€)/i, "")) || 0;
-  const pressupost_licitacio_amb   = parseNum(budgetAmbStr.replace(/\s*(Euros|€)/i, "")) || 0;
+  // General fields
+  const organ      = stripOrgPeriod(lbl("òrgan de contractació"));
+  const tipus      = normalizeType(lbl("tipus de contracte"));
+  const procediment = lbl("procediment");
+  const expedient  = lbl("núm. d'expedient") || lbl("núm d'expedient") || lbl("num. d'expedient");
 
-  // Dates
-  const dataPublicacioRaw = lbl("Data de publicació");
-  const dataPublicacio = parseDate(dataPublicacioRaw);
+  // Budget (licitació)
+  const pressupost_licitacio_sense = parseNum((lbl("pressupost de licitació (iva exclòs)") || "").replace(/\s*(euros|€)/i, "")) || 0;
+  const pressupost_licitacio_amb   = parseNum((lbl("pressupost de licitació (iva inclòs)") || "").replace(/\s*(euros|€)/i, "")) || 0;
 
-  // Provisional award section
-  const adjProv     = lbl("Adjudicatari provisional");
-  const dataAdjProv = parseDate(lbl("Data de l'adjudicació provisional"));
+  // Publication date — try dedicated label first, then first date in "Dates d'interès"
+  let dataPublicacio = parseDate(lbl("data de publicació"));
+  if (!dataPublicacio) {
+    const datesM = info.match(/Dates d[''\u2019]inter[eè]s[\s\S]*?<p>([\s\S]*?)<\/p>/i);
+    if (datesM) {
+      const dm = datesM[1].match(/(\d{2}\/\d{2}\/\d{4})/);
+      if (dm) dataPublicacio = parseDate(dm[1]);
+    }
+  }
 
-  // "Més informació" free-text section
-  let dataAdj       = dataAdjProv;
-  let denominacioAdj = adjProv;
-  let nifAdj        = "";
-  let importSense   = NaN;
-  let importAmb     = NaN;
-  let dataFormal    = "";
+  // Provisional award
+  const adjProv    = lbl("adjudicatari provisional");
+  const dataAdjProv = parseDate(lbl("data de l'adjudicació provisional") || lbl("data de l\u2019adjudicació provisional"));
 
-  const mesM = info.match(/Més informació[\s\S]*?<p>([\s\S]*?)<\/p>/i);
+  // Definitive award / Formalització section
+  // Uses labelMapLast so "Adjudicatari" in Formalització overwrites any earlier match
+  const adjDefinitiu    = lblL("adjudicatari");
+  const importAdjSense  = parseNum((lblL("pressupost d'adjudicació (iva exclòs)") || lblL("pressupost d\u2019adjudicació (iva exclòs)") || "").replace(/\s*(euros|€)/i, ""));
+  const importAdjAmb    = parseNum((lblL("pressupost d'adjudicació (iva inclòs)") || lblL("pressupost d\u2019adjudicació (iva inclòs)") || "").replace(/\s*(euros|€)/i, ""));
+
+  // Synthesize final values
+  let dataAdj        = dataAdjProv;
+  let dataFormal     = "";
+  let nifAdj         = "";
+  let denominacioAdj = adjDefinitiu || adjProv;
+  let importSense    = importAdjSense;
+  let importAmb      = importAdjAmb;
+
+  // "Més informació" free-text section (older contracts)
+  const mesM = info.match(/M[eé]s informaci[oó][\s\S]*?<p>([\s\S]*?)<\/p>/i);
   if (mesM) {
     const mi = mesM[1];
 
-    const dateM = mi.match(/Data d'adjudicació:?\s*(\d{2}\/\d{2}\/\d{4})/i);
-    if (dateM) dataAdj = parseDate(dateM[1]);
+    const dateAdjM = mi.match(/Data d[''\u2019]adjudicaci[oó]:?\s*(\d{2}\/\d{2}\/\d{4})/i);
+    if (dateAdjM) dataAdj = parseDate(dateAdjM[1]);
 
-    const formalM = mi.match(/Data de formalització:?\s*(\d{2}\/\d{2}\/\d{4})/i);
-    if (formalM) dataFormal = parseDate(formalM[1]);
+    const dateFormalM = mi.match(/Data de formalitzaci[oó]:?\s*(\d{2}\/\d{2}\/\d{4})/i);
+    if (dateFormalM) dataFormal = parseDate(dateFormalM[1]);
 
-    const empM = mi.match(/Empresa adjudicatària:([^.<\n]+)/i);
-    if (empM) denominacioAdj = empM[1].trim();
+    const empM = mi.match(/Empresa adjudicat[aà]ria:([^.<\n]+)/i);
+    if (empM && !denominacioAdj) denominacioAdj = empM[1].trim();
 
-    const nifM = mi.match(/NIF[/]?CIF:?\s*([A-Z0-9-]+)/i) || mi.match(/\bNIF:?\s*([A-Z0-9-]+)/i);
+    const nifM = mi.match(/NIF\/?CIF:?\s*([A-Z0-9-]{7,12})/i) || mi.match(/\bNIF:?\s*([A-Z0-9-]{7,12})/i);
     if (nifM) nifAdj = nifM[1].trim();
 
-    // "import sense Iva: 65.327,72 €"
-    const sensM = mi.match(/import sense (?:Iva|IVA):?\s*([\d.,]+)\s*(?:€|Euros?)/i);
-    if (sensM) importSense = parseNum(sensM[1]);
+    const sensM = mi.match(/import sense (?:Iva|IVA):?\s*([\d.,]+)\s*(?:€|euros?)/i);
+    if (sensM && isNaN(importSense)) importSense = parseNum(sensM[1]);
 
-    const totM = mi.match(/Total:?\s*([\d.,]+)\s*(?:€|Euros?)/i);
-    if (totM) importAmb = parseNum(totM[1]);
+    const totM = mi.match(/Total:?\s*([\d.,]+)\s*(?:€|euros?)/i);
+    if (totM && isNaN(importAmb)) importAmb = parseNum(totM[1]);
   }
+
+  // Last-resort dates: timestamp seal script calls
+  const sealDates = [...info.matchAll(/saf_SegellMiniURL\([^,]+,\s*'(\d{2}\/\d{2}\/\d{4})'\)/g)]
+    .map((m) => parseDate(m[1]))
+    .filter(Boolean);
 
   // Title from <h3>
   const h3M = info.match(/<h3>\s*([\s\S]*?)\s*<\/h3>/);
   const title = h3M ? h3M[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
 
-  // If we have company name but no NIF, generate a synthetic identifier
+  // Best year: adjudication > formalization > publication > seal
+  const year =
+    extractYear(dataAdj) ||
+    extractYear(dataFormal) ||
+    extractYear(dataPublicacio) ||
+    extractYear(sealDates[0] || "");
+
+  // Synthetic NIF when company name known but NIF missing
   if (!nifAdj && denominacioAdj) {
     nifAdj = syntheticNif(denominacioAdj);
   }
 
-  // Use budget as amount fallback only when we have a company name
+  // Amount fallback: use budget when we have a company but no award amount
   const finalImportSense = isNaN(importSense)
     ? (denominacioAdj ? pressupost_licitacio_sense : 0)
     : importSense;
@@ -318,13 +355,6 @@ async function parseDetailPage(id) {
     ? (denominacioAdj ? pressupost_licitacio_amb || finalImportSense : 0)
     : importAmb;
 
-  // Best year
-  const year =
-    extractYear(dataAdj) ||
-    extractYear(dataFormal) ||
-    extractYear(dataPublicacio);
-
-  // Link to the detail page
   const enllac = `${BASE_URL}/Licitacion.jsp?id=${id}&idOrganoContratacion=-1&idi=ca&baja=&historico=true`;
 
   return {

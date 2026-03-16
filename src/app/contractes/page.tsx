@@ -6,7 +6,7 @@ import { fetchContracts, fetchContractsCount } from "@/lib/api";
 export const metadata: Metadata = {
   title: "Explorador de contractes",
   description:
-    "Explora tots els contractes públics a Catalunya amb filtres per any, tipus, procediment i import.",
+    "Explora tots els contractes públics a les Illes Balears amb filtres per any, tipus, procediment i import.",
 };
 
 interface Props {
@@ -59,7 +59,7 @@ export default async function ContractesPage({ searchParams }: Props) {
       </div>
       <p className="text-gray-600 mb-8">
         Cerca i filtra tots els contractes públics publicats a la plataforma de
-        contractació pública de Catalunya.
+        contractació pública de les Illes Balears.
       </p>
       <ContractExplorer
         initialFilters={initialFilters}

@@ -28,7 +28,7 @@ export default function LegalPage() {
         <h2 className="text-xl font-bold text-gray-900 mb-3">Responsable del web</h2>
         <p className="text-gray-700 mb-3">
           Aquest web és un projecte independent i no oficial. El seu objectiu és
-          facilitar la transparència sobre la contractació pública a Catalunya a
+          facilitar la transparència sobre la contractació pública a les Illes Balears a
           partir de dades obertes.
         </p>
         <p className="text-gray-700">

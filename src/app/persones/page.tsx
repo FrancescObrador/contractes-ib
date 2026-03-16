@@ -7,7 +7,7 @@ import { loadTopVinculacions } from "@/lib/persones-top";
 export const metadata: Metadata = {
   title: "Persones vinculades (BORME)",
   description:
-    "Cerca de persones amb càrrecs societaris en empreses vinculades a contractació pública a Catalunya.",
+    "Cerca de persones amb càrrecs societaris en empreses vinculades a contractació pública a les Illes Balears.",
 };
 
 interface Props {

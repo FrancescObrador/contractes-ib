@@ -4,15 +4,15 @@ const BASE_URL = process.env.CONTRACTES_API_BASE || "https://www.contractes.cat"
 const VERSION = "0.1.0";
 
 const SOURCE_ATTRIBUTION = {
-  dataset_id: "ybgg-dgi6",
+  dataset_id: "34ea0416-90fb-43cc-a866-4933cc6ce6e1",
   dataset_name:
-    "Contractacio publica a Catalunya: publicacions a la Plataforma de serveis de contractacio publica",
-  publisher: "Departament d'Economia i Hisenda",
+    "Contractes de la Comunitat Autonoma de les Illes Balears (CAIB)",
+  publisher: "Govern de les Illes Balears",
   source_url:
-    "https://analisi.transparenciacatalunya.cat/Sector-P-blic/Contractaci-del-sector-p-blic-de-la-Generalitat-d/ybgg-dgi6",
-  license: "See terms of use / Open data license",
+    "https://intranet.caib.es/opendatacataleg/dataset/c992354b-7546-4280-a144-6211f6ecfed4",
+  license: "Open data license",
   license_url:
-    "https://administraciodigital.gencat.cat/ca/dades/dades-obertes/informacio-practica/llicencies/"
+    "https://intranet.caib.es/opendatacataleg/"
 };
 
 const HELP = `contractes ${VERSION}
@@ -41,7 +41,7 @@ Examples:
   contractes search-contracts --nif B12345678 --sort amount-desc
   contractes search-companies --search "ferrovial" --page 1
   contractes search-organs --search "ajuntament" --limit 25
-  contractes organ-top-companies --organ "Ajuntament de Barcelona" --limit 10
+  contractes organ-top-companies --organ "Consell de Mallorca" --limit 10
   contractes person-contracts --name "Nom Cognom" --date-from 2024-01-01 --date-to 2025-12-31
 `;
 

@@ -1,7 +1,7 @@
 {
   "name": "@gerardgimenezadsuar/contractes-cli",
   "version": "0.1.0",
-  "description": "CLI to query Catalonia public contract data from contractes.cat",
+  "description": "CLI to query Illes Balears public contract data from contractes.cat",
   "type": "module",
   "bin": {
     "contractes": "bin/contractes.js"
@@ -16,7 +16,7 @@
   "keywords": [
     "contractes",
     "contractes-cat",
-    "catalonia",
+    "illes-balears",
     "public-procurement",
     "open-data",
     "socrata",

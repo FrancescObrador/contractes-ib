@@ -4,7 +4,7 @@ import { SITE_NAME } from "@/config/constants";
 export const metadata: Metadata = {
   title: "CLI oficial",
   description:
-    "Instal·lació i ús de la CLI de contractes.cat per consultar contractació pública de Catalunya.",
+    "Instal·lació i ús de la CLI de contractes.cat per consultar contractació pública de les Illes Balears.",
 };
 
 export default function CliPage() {
@@ -36,7 +36,7 @@ export default function CliPage() {
           <code>{`contractes search-contracts --search "neteja" --year 2025
 contractes search-companies --search "ferrovial"
 contractes search-organs --search "ajuntament" --limit 25
-contractes organ-top-companies --organ "Ajuntament de Barcelona" --limit 10
+contractes organ-top-companies --organ "Consell de Mallorca" --limit 10
 contractes person-contracts --name "Nom Cognom"
 contractes attribution`}</code>
         </pre>
@@ -55,16 +55,15 @@ contractes attribution`}</code>
       <section>
         <h2 className="text-xl font-bold text-gray-900 mb-3">Atribució de dades</h2>
         <p className="text-gray-700">
-          Font original: Departament d&apos;Economia i Hisenda (dataset `ybgg-dgi6`)
-          a Transparència Catalunya. Consulta llicències i condicions d&apos;ús a:
+          Font original: Govern de les Illes Balears (CAIB), Portal de Dades Obertes. Consulta llicències i condicions d&apos;ús a:
           {" "}
           <a
-            href="https://administraciodigital.gencat.cat/ca/dades/dades-obertes/informacio-practica/llicencies/"
+            href="https://intranet.caib.es/opendatacataleg/"
             target="_blank"
             rel="noopener noreferrer"
             className="text-blue-600 hover:underline"
           >
-            administraciodigital.gencat.cat
+            intranet.caib.es/opendatacataleg
           </a>
           .
         </p>

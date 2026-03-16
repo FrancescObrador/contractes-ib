@@ -72,7 +72,7 @@ export default async function Image() {
                 fontWeight: 500,
               }}
             >
-              Contractació pública a Catalunya
+              Contractació pública a les Illes Balears
             </div>
             <div
               style={{

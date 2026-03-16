@@ -467,7 +467,7 @@ export default async function HomePage() {
             </div>
             <h3 className="mb-1 font-semibold text-gray-900">Organismes</h3>
             <p className="text-sm text-gray-600">
-              Ajuntaments, Generalitat i ens públics. Detall anual i empreses adjudicatàries.
+              Consells Insulars, CAIB i ens públics. Detall anual i empreses adjudicatàries.
             </p>
           </Link>
           <Link

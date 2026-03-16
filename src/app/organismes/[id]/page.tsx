@@ -66,7 +66,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
       organName,
       `${organName} contractes`,
       "organisme contractant",
-      "contractació pública Catalunya",
+      "contractació pública Illes Balears",
     ],
     openGraphType: "article",
   });
@@ -162,7 +162,7 @@ export default async function OrganDetailPage({ params, searchParams }: Props) {
     <div className="min-w-0">
       <h2 className="text-xl font-bold text-gray-900 mb-1">Càrrecs electes actuals</h2>
       <p className="mb-3 text-xs text-gray-500">
-        Font: Transparència Catalunya. Llistat inferit per darrer nomenament conegut per plaça.
+        Llistat inferit per darrer nomenament conegut per plaça (font: dades obertes de transparència).
       </p>
       <div className="bg-white rounded-lg border border-gray-100 shadow-sm overflow-hidden">
         <div className="border-b border-gray-100 bg-gray-50 px-3 py-2.5 text-xs text-gray-700">

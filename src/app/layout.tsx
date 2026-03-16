@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: `${SITE_NAME} - Contractació pública a Catalunya`,
+    default: `${SITE_NAME} - Contractació pública a les Illes Balears`,
     template: `%s | ${SITE_NAME}`,
   },
   description: SITE_DESCRIPTION,

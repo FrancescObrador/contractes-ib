@@ -64,7 +64,7 @@ export async function generateMetadata({ params, searchParams }: Props): Promise
       companyName,
       decodedId,
       `${companyName} contractes`,
-      "contractació pública Catalunya",
+      "contractació pública Illes Balears",
     ],
     openGraphType: "article",
   });
