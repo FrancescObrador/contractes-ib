@@ -1,6 +1,6 @@
 # @gerardgimenezadsuar/contractes-cli
 
-CLI to query Catalonia public contract data from [contractes.cat](https://www.contractes.cat).
+CLI to query Illes Balears public contract data from [contractes.cat](https://www.contractes.cat).
 
 ## Install
 
@@ -20,7 +20,7 @@ npx @gerardgimenezadsuar/contractes-cli help
 contractes search-contracts --search "neteja" --year 2025 --page 1
 contractes search-companies --search "ferrovial" --page 1
 contractes search-organs --search "ajuntament" --limit 25
-contractes organ-top-companies --organ "Ajuntament de Barcelona" --limit 10
+contractes organ-top-companies --organ "Consell de Mallorca" --limit 10
 contractes person-contracts --name "Nom Cognom" --date-from 2024-01-01 --date-to 2025-12-31
 contractes attribution
 ```
@@ -42,11 +42,11 @@ CONTRACTES_API_BASE=http://localhost:3000 contractes search-contracts --search s
 
 ## Data source and attribution
 
-The CLI uses public data displayed by contractes.cat from the official Catalonia open-data dataset:
+The CLI uses public data displayed by contractes.cat from the official Illes Balears open-data dataset:
 
-- Dataset: `ybgg-dgi6`
-- Publisher: Departament d'Economia i Hisenda
-- License/terms: <https://administraciodigital.gencat.cat/ca/dades/dades-obertes/informacio-practica/llicencies/>
+- Dataset: `34ea0416-90fb-43cc-a866-4933cc6ce6e1`
+- Publisher: Govern de les Illes Balears (CAIB)
+- License/terms: <https://intranet.caib.es/opendatacataleg/>
 
 ## Publish and agent discoverability checklist
 

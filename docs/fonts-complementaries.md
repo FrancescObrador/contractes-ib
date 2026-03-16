@@ -16,7 +16,7 @@ El dataset CSV actual cobreix els contractes **adjudicats** del Govern de les Il
 
 ---
 
-## 1. Plataforma de Contractació de la CAIB (2008–2017)
+## 1. Plataforma de Contractació de la CAIB (2008–2017) ✅ INTEGRAT
 
 **URL:** https://plataformadecontractacio.caib.es
 
@@ -26,12 +26,12 @@ El dataset CSV actual cobreix els contractes **adjudicats** del Govern de les Il
 - Contractes menors, programats, acords marc, sistemes dinàmics
 
 ### API / descàrrega
-Únicament navegació web HTML. **No hi ha API ni exportació estructurada.** Caldria scraping.
+Únicament navegació web HTML. **No hi ha API ni exportació estructurada.** S'ha implementat scraping.
 
 ### Valor afegit
-Cobreix el **període historic pre-2017** absent del CSV actual. Si s'incorporés, la sèrie temporal es podria allargar fins al 2008.
+Cobreix el **període historic pre-2017** absent del CSV actual. La sèrie temporal ara s'allarga fins al 2008.
 
-### Complexitat d'integració: Alta (scraping)
+### Estat: **Completat** — `data/caib/contracts-historic.json` commitat al repositori (~13.926 contractes). No cal regenerar (dades congelades el 2017). Veure `scripts/ingest-historic.mjs`.
 
 ---
 
@@ -231,7 +231,7 @@ Molt baix per a integració estructurada. El contingut és HTML/PDF no estructur
 | PCSP estatal (ATOM/XML) | ✅ | XML CODICE | Totes les AAPP Balears | ⭐⭐⭐⭐⭐ | Alta |
 | Socrata API GOIB | ✅ | JSON/CSV | CAIB + sector instrumental | ⭐⭐⭐ | Baixa |
 | Portal Transparència CAIB | ✅ CSV/Excel | CSV, XLSX | CAIB + sector instrumental | ⭐⭐ | Baixa |
-| Plataforma CAIB 2008–2017 | ❌ scraping | HTML | CAIB | ⭐⭐⭐ (históric) | Alta |
+| Plataforma CAIB 2008–2017 | ✅ integrat | JSON | CAIB | ⭐⭐⭐ (históric) | — (fet) |
 | Consell Menorca (Excel) | Parcial | XLSX | Menorca | ⭐ | Mitjana |
 | Registre Contractes estatal | ✅ CSV | CSV agregat | Totes CCAA | ⭐ (stats) | Baixa |
 | Gobierto Contratación | ✅ SQL API | JSON | Estatal (Balears) | ⭐⭐ | Baixa |
@@ -271,7 +271,7 @@ Verificar si el fitxer de contractes menors del portal de transparència aporta 
 
 ---
 
-### Prioritat 4 — Plataforma CAIB 2008–2017 (scraping)
-Per a un projecte d'extensió historic que allargui la sèrie temporal fins al 2008. Requereix scraping web i normalització dels camps (el model de dades és diferent). Esforç considerable, però el valor és clar per a anàlisis de llarg recorregut.
+### ~~Prioritat 4 — Plataforma CAIB 2008–2017 (scraping)~~ ✅ COMPLETAT
+Integrat. `data/caib/contracts-historic.json` (~13.926 contractes, 2008–2017) commitat al repositori. La sèrie temporal ara cobreix des del 2008.
 
 **URL:** https://plataformadecontractacio.caib.es
