@@ -1,7 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Ensure data files are included in Vercel serverless function bundles.
+  // Next.js output file tracing cannot detect dynamic readFileSync paths.
+  outputFileTracingIncludes: {
+    "/**": ["./data/caib/*.json"],
+  },
 };
 
 export default nextConfig;
