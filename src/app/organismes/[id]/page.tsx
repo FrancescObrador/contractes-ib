@@ -25,6 +25,7 @@ import {
 import StatCard from "@/components/ui/StatCard";
 import { YearlyTrendChartLazy } from "@/components/charts/LazyCharts";
 import SharePageButton from "@/components/ui/SharePageButton";
+import PaginationLink from "@/components/ui/PaginationLink";
 import OrganContractsExplorer from "@/components/organ/OrganContractsExplorer";
 import OrganTopCompaniesTable from "@/components/organ/OrganTopCompaniesTable";
 
@@ -193,26 +194,24 @@ export default async function OrganDetailPage({ params, searchParams }: Props) {
             </p>
             <div className="flex items-center gap-1.5">
               {electes.page > 1 ? (
-                <Link
+                <PaginationLink
                   href={buildElectesPageHref(electes.page - 1)}
-                  scroll={false}
                   className="px-2.5 py-1 rounded border border-gray-300 hover:bg-gray-50"
                 >
                   Anterior
-                </Link>
+                </PaginationLink>
               ) : (
                 <span className="px-2.5 py-1 rounded border border-gray-200 text-gray-400">
                   Anterior
                 </span>
               )}
               {electes.page < electesTotalPages ? (
-                <Link
+                <PaginationLink
                   href={buildElectesPageHref(electes.page + 1)}
-                  scroll={false}
                   className="px-2.5 py-1 rounded border border-gray-300 hover:bg-gray-50"
                 >
                   Següent
-                </Link>
+                </PaginationLink>
               ) : (
                 <span className="px-2.5 py-1 rounded border border-gray-200 text-gray-400">
                   Següent
